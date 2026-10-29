@@ -1,4 +1,4 @@
-# Relit Splats
+# Splatlight
 
 A browser demo of a fully relightable volumetric Gaussian-splat renderer (WebGPU): every Gaussian carries
 material properties and is lit at runtime by emissive Gaussian lights, sky and sun, with bounce light, shadows

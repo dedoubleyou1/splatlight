@@ -24,5 +24,5 @@ if __name__ == '__main__':
     parser.add_argument('--port', type=int, default=8771)
     args = parser.parse_args()
     server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
-    print(f'Relit Splats: http://127.0.0.1:{args.port}/', flush=True)
+    print(f'Splatlight: http://127.0.0.1:{args.port}/', flush=True)
     server.serve_forever()
