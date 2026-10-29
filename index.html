@@ -13,6 +13,7 @@
   #view { width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
   #status { position: absolute; left: 8px; top: 6px; color: var(--muted); }
   #status.error { color: var(--err); right: 8px; }
+  #fps { position: absolute; right: 8px; top: 6px; padding: 2px 6px; background: #000a; font: 12px/1.35 ui-monospace, monospace; font-variant-numeric: tabular-nums; }
   #timers { position: absolute; left: 8px; bottom: 6px; margin: 0; padding: 6px 8px; background: #000a; font: 11px/1.35 ui-monospace, monospace; white-space: pre; }
   aside { background: var(--panel); border-left: 1px solid var(--line); overflow-y: auto; padding: 6px 10px; }
   fieldset { border: 1px solid var(--line); margin: 6px 0; padding: 4px 8px 6px; }
@@ -33,6 +34,7 @@
 <main>
   <canvas id="view"></canvas>
   <div id="status">Starting…</div>
+  <div id="fps"></div>
   <pre id="timers"></pre>
 </main>
 <aside id="panel">

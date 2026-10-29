@@ -442,6 +442,14 @@ async function main() {
 
   const hud = $('timers');
   let lastFrame = performance.now(), cpuMs = 0, frames = 0;
+  // FPS ticker: frames drawn per half second. The page renders on demand, so it reads "idle" once nothing is changing.
+  const fpsEl = $('fps');
+  let fpsFrames = 0, fpsT0 = performance.now();
+  setInterval(() => {
+    const t = performance.now();
+    fpsEl.textContent = fpsFrames ? `${Math.round(fpsFrames * 1000 / (t - fpsT0))} fps` : 'idle';
+    fpsFrames = 0; fpsT0 = t;
+  }, 500);
   function showTimers() {
     const lines = timers.enabled
       ? PASSES.map(n => `${n.padEnd(9)} ${timers.ms[n].toFixed(3)} ms`)
@@ -471,6 +479,7 @@ async function main() {
     if (playing && dt < 250) clipTime += dt / 1000 * state.armSpeed;
     if (dt < 250) cpuMs = cpuMs ? cpuMs * 0.9 + dt * 0.1 : dt;
     lastFrame = now;
+    fpsFrames++;
     const emissive = state.lightModel === EMISSIVE;
     lighting.emitterTarget = [300, 1200, 4800, 16000][state.emitterCount];
     lighting.emitMode = state.lightCut ? 1 : 0;
