@@ -290,15 +290,12 @@ async function main() {
       } },
     ] },
   ];
-  // The public demo shows these controls; ?debug=1 or the panel's debug toggle shows the rest and the pass timers.
+  // The public demo shows these controls; ?debug=1 (no visible toggle) shows the rest and the pass timers.
   const DEMO = new Set(['lampX', 'lampY', 'lampZ', 'lampSize', 'shortX', 'shortY', 'shortYaw', 'shortShine', 'shortRough',
     'tallX', 'tallY', 'tallYaw', 'tallShine', 'tallRough', 'floorShine', 'floorRough', 'white', 'red', 'green',
     'envOn', 'sunAz', 'sunEl', 'sunGain', 'skyGain', 'bounce', 'exposure', 'Reset camera', 'Reset scene']);
   const inputs = buildPanel($('panel'), groups, state, touch, DEMO);
-  const debugToggle = $('debug');
-  const setDebug = on => { document.body.classList.toggle('debug-on', on); debugToggle.checked = on; };
-  debugToggle.oninput = () => setDebug(debugToggle.checked);
-  setDebug(params.get('debug') === '1');
+  document.body.classList.toggle('debug-on', params.get('debug') === '1');
   camera.attach(canvas, touch);
 
   // Render uniform (layout: shaders/common.wgsl `RenderFrame`).
