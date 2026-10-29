@@ -21,6 +21,11 @@
   .row input[type=range], .row select { width: 100%; }
   .row output { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
   .row button { grid-column: 1 / -1; }
+  .intro { padding: 4px 0 6px; border-bottom: 1px solid var(--line); }
+  .intro h1 { font-size: 15px; margin: 2px 0 4px; }
+  .intro p { margin: 0 0 6px; color: var(--muted); }
+  .intro a { color: var(--text); }
+  body:not(.debug-on) .debug, body:not(.debug-on) #timers { display: none; }
   @media (max-width: 700px) { body { grid-template-columns: 1fr; grid-template-rows: 60vh 1fr; } aside { border-left: 0; border-top: 1px solid var(--line); } }
 </style>
 </head>
@@ -30,7 +35,15 @@
   <div id="status">Starting…</div>
   <pre id="timers"></pre>
 </main>
-<aside id="panel"></aside>
+<aside id="panel">
+  <div class="intro">
+    <h1>Splatlight</h1>
+    <p>Fully relightable volumetric Gaussian splats in WebGPU. Every Gaussian carries material properties and is lit
+    live by emissive Gaussian lights, sky and sun, with shadows and bounce light. Drag to orbit, shift- or right-drag
+    to pan, wheel to dolly.</p>
+    <label><input type="checkbox" id="debug"> show debug controls and timers</label>
+  </div>
+</aside>
 <script type="module" src="src/main.js"></script>
 </body>
 </html>

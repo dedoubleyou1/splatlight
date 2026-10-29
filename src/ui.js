@@ -1,14 +1,18 @@
 // Slider panel built from a declarative list; every control writes into
 // `state` and calls onChange so the loop redraws on demand.
 
-export function buildPanel(root, groups, state, onChange) {
+// Controls whose key (or button text) is in `demo` stay visible; the rest get the `debug` class, which the page hides
+// until the debug toggle is on.
+export function buildPanel(root, groups, state, onChange, demo = null) {
   const inputs = {};
+  const isDemo = c => !demo || demo.has(c.key ?? c.text);
   for (const g of groups) {
     const box = document.createElement('fieldset');
     box.innerHTML = `<legend>${g.title}</legend>`;
+    if (!g.controls.some(isDemo)) box.classList.add('debug');
     for (const c of g.controls) {
       const row = document.createElement('label');
-      row.className = 'row';
+      row.className = isDemo(c) ? 'row' : 'row debug';
       const name = document.createElement('span');
       name.textContent = c.label;
       row.append(name);
