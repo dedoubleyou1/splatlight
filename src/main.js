@@ -291,7 +291,7 @@ async function main() {
     ] },
   ];
   // The public demo shows these controls; ?debug=1 (no visible toggle) shows the rest and the pass timers.
-  const DEMO = new Set(['lampX', 'lampY', 'lampZ', 'lampSize', 'shortX', 'shortY', 'shortYaw', 'shortShine', 'shortRough',
+  const DEMO = new Set(['lampX', 'lampY', 'lampZ', 'oneSided', 'shortX', 'shortY', 'shortYaw', 'shortShine', 'shortRough',
     'tallX', 'tallY', 'tallYaw', 'tallShine', 'tallRough', 'floorShine', 'floorRough', 'white', 'red', 'green',
     'envOn', 'sunAz', 'sunEl', 'sunGain', 'skyGain', 'bounce', 'exposure', 'Reset camera', 'Reset scene']);
   const inputs = buildPanel($('panel'), groups, state, touch, DEMO);
