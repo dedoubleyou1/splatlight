@@ -5,9 +5,6 @@ import { partTransform, perspective, srgbToLinear, linearToSrgb } from './math.j
 import { SplatRenderer, PASSES, FRAME_BYTES } from './renderer.js';
 import { Lighting, KERNELS, nodeProbeSource } from './lighting.js';
 import { nodeGaussians, Lod } from './lod.js';
-import { OnePath } from './onepath.js';
-import { OnePathSpec } from './onepath_spec.js';
-import { OnePathDet } from './onepath_det.js';
 import { FlakeCamera } from './flake.js';
 import { LightShadow } from './light_shadow.js';
 import { Environment, loadEnvironment } from './environment.js';
@@ -102,14 +99,6 @@ async function main() {
     if (fieldWarning) console.warn(fieldWarning);
   }
   renderer.bindColour(lighting.buffers.colour, lighting.buffers.lo_b, lighting.buffers.emitters);
-  // ?lighting=onepath (M45 E9): one gather for lamp and bounce instead of the lighting kernels (parts move by transform); needs
-  // the asset's onepath.bin (experiments/M45_unified/E9_gpu/bake_onepath.py) and a true-density V (cornell_sdf_room_plain)
-  const onepath = params.get('lighting') === 'onepath' ? await OnePath.load(device, assetName, runtimeShaders, lighting) : null;
-  if (onepath) renderer.bindColour(onepath.colour, onepath.zeroBounce, lighting.buffers.emitters);
-  // its specular (M45 E9 milestone 7): shiny materials take the light cut's nodes as ASG lobes toward the eye
-  const onepathSpec = onepath ? await OnePathSpec.load(device, assetName, runtimeShaders, onepath, lighting) : null;
-  // &det=1: the deterministic one-frame mode (every frame converged: a fixed light cut, 3 bounces + the geometric tail)
-  const onepathDet = onepath && params.get('det') === '1' ? await OnePathDet.load(device, assetName, runtimeShaders, onepath, lighting) : null;
   // SPEC 2.9 environment: the asset's sky + distant lights, or ?env=<name> (runtime/assets/env/<name>.json), ?env=none off
   const envDesc = await loadEnvironment(asset, params);
   const environment = envDesc ? new Environment(device, runtimeShaders, lighting, envDesc, header.parts, asset) : null;
@@ -118,7 +107,7 @@ async function main() {
   const flake = new FlakeCamera(device, runtimeShaders, lighting);
   renderer.bindFlake(flake.cam, lighting.buffers.lo_b, lighting.buffers.emitters);
   // Inspection hook for debugging from the console (reads buffers with readBuffer below).
-  window.gsDebug = { device, lighting, renderer, flake, asset, onepath, onepathSpec, onepathDet, readBuffer: async (buf, size = buf.size) => {
+  window.gsDebug = { device, lighting, renderer, flake, asset, readBuffer: async (buf, size = buf.size) => {
     const tmp = device.createBuffer({ size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const enc = device.createCommandEncoder();
     enc.copyBufferToBuffer(buf, 0, tmp, 0, size);
@@ -535,11 +524,7 @@ async function main() {
         }
         transmitSet = trKey;
       }
-      if (onepath) {
-        if (onepathDet) onepathDet.encode(encoder, lighting.partXf, environment);
-        else onepath.encode(encoder, lighting.partXf, environment, viewProj());   // sky + sun as distant senders in its gather (M45 E5)
-        onepathSpec?.encode(encoder, camera.eye());
-      } else if (state.progressive && emissive) {
+      if (state.progressive && emissive) {
         // progressive tree lighting: a change (lamp, emitters or a part moved) coarsens and refines again
         lighting.encodeProgressive(encoder, camera.eye(), timers, {
           budget: [1000, 4000, 16000, 64000][state.lpBudget], minAng: state.lpPx * camera.fovy / canvas.height,
@@ -564,10 +549,9 @@ async function main() {
     if (window.gsDebug?.gpuTimes) device.queue.onSubmittedWorkDone().then(() => window.gsDebug.gpuTimes?.push(performance.now() - t0));
     timers.collect(readback, showTimers);
     if (++frames === 1) $('status').textContent = `${header.format} ${header.version} · ${assetName} · ${asset.count.toLocaleString()} Gaussians, ${asset.partCount} parts`
-      + (fieldWarning ? ` · ${fieldWarning}` : '') + (onepath ? ' · one-path lighting (M45)' : '');
+      + (fieldWarning ? ` · ${fieldWarning}` : '');
     if (state.viewMode === LIT && settle > 0) { settle--; dirty = true; }
-    if (state.viewMode === LIT && (onepathDet ?? onepath)?.converging) dirty = true;   // one-path lighting averages its first frames
-    if (state.viewMode === LIT && environment?.busy && !onepath) dirty = true;   // the sun shadows run in slices (environment.js)
+    if (state.viewMode === LIT && environment?.busy) dirty = true;   // the sun shadows run in slices (environment.js)
     if (state.continuous || dirty || playing) schedule();
   }
   let lampPrev = null, roughnessSet = null, boxSet = null, transmitSet = null, emitterCount = 0, lpStarted = false;
