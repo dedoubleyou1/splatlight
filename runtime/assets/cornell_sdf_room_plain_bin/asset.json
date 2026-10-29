@@ -1,0 +1,519 @@
+{
+ "format": "gs-runtime",
+ "version": "0.2",
+ "spec": "runtime/SPEC.md",
+ "buffers": {
+  "gaussians": {
+   "file": "gaussians.bin",
+   "count": 78148,
+   "stride": 64,
+   "fields": {
+    "mu": {
+     "offset": 0,
+     "type": "f32x3"
+    },
+    "kappa": {
+     "offset": 12,
+     "type": "f32"
+    },
+    "quat": {
+     "offset": 16,
+     "type": "f32x4"
+    },
+    "scale": {
+     "offset": 32,
+     "type": "f32x3"
+    },
+    "part_surface": {
+     "offset": 44,
+     "type": "u32"
+    },
+    "albedo": {
+     "offset": 48,
+     "type": "f32x3"
+    },
+    "flags": {
+     "offset": 60,
+     "type": "u32"
+    }
+   }
+  },
+  "nodes": {
+   "file": "nodes.bin",
+   "count": 156289,
+   "stride": 96,
+   "fields": {
+    "mean": {
+     "offset": 0,
+     "type": "f32x3"
+    },
+    "radius": {
+     "offset": 12,
+     "type": "f32"
+    },
+    "cinv_diag": {
+     "offset": 16,
+     "type": "f32x3"
+    },
+    "kappa": {
+     "offset": 28,
+     "type": "f32"
+    },
+    "cinv_off": {
+     "offset": 32,
+     "type": "f32x3"
+    },
+    "smax": {
+     "offset": 44,
+     "type": "f32"
+    },
+    "sn_diag": {
+     "offset": 48,
+     "type": "f32x3"
+    },
+    "part": {
+     "offset": 60,
+     "type": "u32"
+    },
+    "sn_off": {
+     "offset": 64,
+     "type": "f32x3"
+    },
+    "child_lo": {
+     "offset": 76,
+     "type": "u32"
+    },
+    "child_hi": {
+     "offset": 80,
+     "type": "u32"
+    },
+    "depth": {
+     "offset": 84,
+     "type": "u32"
+    }
+   }
+  },
+  "kids": {
+   "file": "kids.bin",
+   "count": 156288,
+   "stride": 4,
+   "fields": {
+    "child": {
+     "offset": 0,
+     "type": "u32"
+    }
+   }
+  },
+  "vgrid": {
+   "file": "vgrid.bin",
+   "count": 78148,
+   "stride": 128,
+   "fields": {
+    "v": {
+     "offset": 0,
+     "type": "u32x32"
+    }
+   }
+  },
+  "parts": {
+   "file": "parts.bin",
+   "count": 8,
+   "stride": 128,
+   "fields": {
+    "xf": {
+     "offset": 0,
+     "type": "f32x12"
+    },
+    "xf_prev": {
+     "offset": 48,
+     "type": "f32x12"
+    },
+    "bound": {
+     "offset": 96,
+     "type": "f32x4"
+    },
+    "root": {
+     "offset": 112,
+     "type": "u32"
+    },
+    "g_lo": {
+     "offset": 116,
+     "type": "u32"
+    },
+    "g_hi": {
+     "offset": 120,
+     "type": "u32"
+    },
+    "flags": {
+     "offset": 124,
+     "type": "u32"
+    }
+   }
+  },
+  "lamps": {
+   "file": "lamps.bin",
+   "count": 1,
+   "stride": 96,
+   "fields": {
+    "center": {
+     "offset": 0,
+     "type": "f32x3"
+    },
+    "kind": {
+     "offset": 12,
+     "type": "u32"
+    },
+    "e1": {
+     "offset": 16,
+     "type": "f32x3"
+    },
+    "radius": {
+     "offset": 28,
+     "type": "f32"
+    },
+    "e2": {
+     "offset": 32,
+     "type": "f32x3"
+    },
+    "range": {
+     "offset": 44,
+     "type": "f32"
+    },
+    "normal": {
+     "offset": 48,
+     "type": "f32x3"
+    },
+    "flags": {
+     "offset": 60,
+     "type": "u32"
+    },
+    "radiance": {
+     "offset": 64,
+     "type": "f32x3"
+    },
+    "center_prev": {
+     "offset": 80,
+     "type": "f32x3"
+    }
+   }
+  },
+  "materials": {
+   "file": "materials.bin",
+   "count": 2,
+   "stride": 32,
+   "fields": {
+    "flake": {
+     "offset": 0,
+     "type": "f32x3"
+    },
+    "phase_samples": {
+     "offset": 12,
+     "type": "u32"
+    },
+    "vfloor": {
+     "offset": 16,
+     "type": "f32"
+    },
+    "flags": {
+     "offset": 20,
+     "type": "u32"
+    },
+    "pad0": {
+     "offset": 24,
+     "type": "u32"
+    },
+    "pad1": {
+     "offset": 28,
+     "type": "u32"
+    }
+   }
+  }
+ },
+ "name": "cornell_sdf_room_plain_bin",
+ "gaussian_count": 78148,
+ "node_count": 156289,
+ "part_count": 8,
+ "lamp_count": 1,
+ "frame": "right-handed, z up, metres (protocol v0.4)",
+ "parts": [
+  {
+   "index": 0,
+   "name": "floor",
+   "root": 87840,
+   "gaussians": [
+    0,
+    9694
+   ],
+   "static": true,
+   "rig_name": null
+  },
+  {
+   "index": 1,
+   "name": "ceiling",
+   "root": 97315,
+   "gaussians": [
+    9694,
+    19170
+   ],
+   "static": true,
+   "rig_name": null
+  },
+  {
+   "index": 2,
+   "name": "back",
+   "root": 104173,
+   "gaussians": [
+    19170,
+    26029
+   ],
+   "static": true,
+   "rig_name": null
+  },
+  {
+   "index": 3,
+   "name": "left_red",
+   "root": 113549,
+   "gaussians": [
+    26029,
+    35406
+   ],
+   "static": true,
+   "rig_name": null
+  },
+  {
+   "index": 4,
+   "name": "right_green",
+   "root": 122949,
+   "gaussians": [
+    35406,
+    44807
+   ],
+   "static": true,
+   "rig_name": null
+  },
+  {
+   "index": 5,
+   "name": "short_box",
+   "root": 135493,
+   "gaussians": [
+    44807,
+    57352
+   ],
+   "static": false,
+   "rig_name": "short_box",
+   "pivot": [
+    0.333,
+    0.6084,
+    0.0
+   ],
+   "rig_parent": "room"
+  },
+  {
+   "index": 6,
+   "name": "tall_box",
+   "root": 155968,
+   "gaussians": [
+    57352,
+    77828
+   ],
+   "static": false,
+   "rig_name": "tall_box",
+   "pivot": [
+    -0.3258,
+    1.2645,
+    0.0
+   ],
+   "rig_parent": "room"
+  },
+  {
+   "index": 7,
+   "name": "lamp",
+   "root": 156287,
+   "gaussians": [
+    77828,
+    78148
+   ],
+   "static": true,
+   "rig_name": null
+  }
+ ],
+ "scene_root": 156288,
+ "lamps": [
+  {
+   "name": "cornell_ceiling",
+   "kind": "rect",
+   "enabled": false
+  }
+ ],
+ "camera": {
+  "model": "pinhole, OpenCV axes (protocol 2)",
+  "eye": [
+   0.0,
+   -2.88,
+   0.9828
+  ],
+  "look_at": [
+   0.0,
+   0.0,
+   0.9828
+  ],
+  "up": [
+   0,
+   0,
+   1
+  ],
+  "fov_deg": 39.30764811610662,
+  "resolution": [
+   256,
+   256
+  ]
+ },
+ "room": {
+  "x": [
+   -1.0008,
+   1.0008
+  ],
+  "y": [
+   0,
+   2.0131200000000002
+  ],
+  "z": [
+   0,
+   1.9756799999999999
+  ],
+  "opening": "-Y (y = 0), open, black outside"
+ },
+ "shading": {
+  "recipe": "M36 settled design (Oct 23): footprint transfer, side-tested 1/V(w_o), 8x16 V grid",
+  "light_samples_axis": 4
+ },
+ "walk": {
+  "theta": 8.0,
+  "stack": 64,
+  "max_fanout": 2,
+  "max_depth": 24
+ },
+ "vgrid": {
+  "rows": 8,
+  "cols": 16,
+  "bits": 8,
+  "source": "baked",
+  "gpu_bake": {
+   "parts": [
+    "floor",
+    "ceiling",
+    "back",
+    "left_red",
+    "right_green",
+    "short_box",
+    "tall_box"
+   ],
+   "rule": "M36 surf.bake rule 0 (light-space), 64 points",
+   "kernel": "experiments/M37_sdf_splats/gpu_bake/bake_v.wgsl",
+   "adapter": "Apple M4",
+   "seconds": 117.7
+  },
+  "translucency_bake_gaussians": {
+   "count": 40281,
+   "k": 1.0
+  }
+ },
+ "provenance": {
+  "source": "sdf:room",
+  "note": "M37 SDF room: skin builder on the M33 geometry (room.py)",
+  "files": []
+ },
+ "materials": [
+  {
+   "index": 0,
+   "name": "matte_flat_flakes",
+   "flake": [
+    1.0,
+    0.0001,
+    0.0001
+   ],
+   "vfloor": 0.02
+  },
+  {
+   "index": 1,
+   "name": "cornell_lamp_emitter",
+   "emission": [
+    17.0,
+    12.0,
+    4.0
+   ],
+   "one_sided": true,
+   "flake": [
+    1.0,
+    0.0001,
+    0.0001
+   ],
+   "vfloor": 0.02
+  }
+ ],
+ "emitters": {
+  "part": 7,
+  "gaussians": 320,
+  "material": 1,
+  "emission": [
+   17.0,
+   12.0,
+   4.0
+  ],
+  "optical_depth": 3.0,
+  "z": 1.93568
+ },
+ "sdf_room": {
+  "wall_mode": "extended",
+  "wall_ext": 0.02,
+  "r_room": 0.005,
+  "r_box": 0.005,
+  "h_min": 0.01,
+  "h_max": 0.06,
+  "grade": 1.0,
+  "counts": {
+   "floor": 9694,
+   "ceiling": 9476,
+   "back": 6859,
+   "left_red": 9377,
+   "right_green": 9401,
+   "short_box": 12545,
+   "tall_box": 20476
+  }
+ },
+ "blockers": {
+  "file": "blockers.bin",
+  "count": 78148,
+  "stride": 64,
+  "k": 8,
+  "fields": {
+   "index": {
+    "offset": 0,
+    "type": "u32"
+   },
+   "weight": {
+    "offset": 4,
+    "type": "f32"
+   }
+  },
+  "rule": "runtime/bake_blockers.py: centre ray per V cell, shares rescaled to 1 - V, hits within kex thicknesses occlude only, weight A Omega share V_blocker(-u), top 8 rescaled to the total",
+  "kex": 3.0,
+  "seconds": 105.7,
+  "with_blockers": 66054,
+  "ratio_mean": 0.0028,
+  "ratio_p50": 0.0,
+  "ratio_p99": 0.0754,
+  "ratio_max": 0.3606,
+  "ratio_over_0p1": 408
+ },
+ "note": "SDF room with the outer skin layer of the boxes and walls baked at 1.0 x density for V (skin_transl.py)",
+ "tree": {
+  "builder": "experiments/M37_sdf_splats/bintree.py",
+  "kind": "binary",
+  "split": "auto",
+  "auto_min": 0.25,
+  "axis": "principal (largest eigenvector of the members' moment-matched covariance)",
+  "source": "cornell_sdf_room_plain",
+  "note": "leaves and per-Gaussian files identical to the source asset"
+ }
+}
