@@ -95,7 +95,7 @@ fn light_T(g: u32, id: u32) -> f32 {
 @group(0) @binding(7) var<storage, read> materials: array<Material>;
 @group(0) @binding(8) var<storage, read_write> colour: array<vec4f>;
 @group(0) @binding(9) var<storage, read> kids: array<u32>;
-@group(0) @binding(13) var<storage, read_write> lo_dir: array<vec4f>;
+@group(0) @binding(13) var<storage, read_write> lo_dir: array<vec4f>;   // per Gaussian (common.wgsl LOB)
 @group(0) @binding(18) var<storage, read> emit_nodes: array<EmitNode>;
 @group(0) @binding(19) var<uniform> EP: EmitParams;
 @group(0) @binding(20) var<storage, read_write> samples: array<Sample>;
@@ -956,6 +956,16 @@ fn shade_emit_list(@builtin(global_invocation_id) gid: vec3u) {
 }
 
 fn shade_leaf(g: u32) {
+    if (EP.count == 0u) {
+        // no emitter or light on (hill, sun only): nothing to gather, only an emissive material's own radiance below.
+        // Skipping the receiver set-up and the walk over the one dark leaf saved ~13 ms a frame on hill (2026-10-31)
+        let mat = materials[min(gaussians[g].flags & 0xFFFFu, max(U.material_count, 1u) - 1u)];
+        if ((mat.flags & 1u) == 0u) {
+            colour[g] = vec4f(0.0, 0.0, 0.0, 1.0);
+            if ((U.iso & 16u) != 0u) { colour[U.gaussian_count + g] = vec4f(0.0); }
+            return;
+        }
+    }
     let r = receiver(g);
     var wo: array<vec3f, 15>;
     wo[0] = normalize(U.eye - r.P);
@@ -1002,9 +1012,72 @@ fn shade_node(g: u32, N: u32) {
 fn direct_dirs_emit(@builtin(global_invocation_id) gid: vec3u) {
     let g = select(gid.x, gid.x * 4u + U.frame % 4u, (U.iso & 2u) != 0u);   // stage 2: a quarter per frame
     if (g >= U.gaussian_count) { return; }
+    direct_dirs_one(g);
+}
+
+// sender LOD (default, ?sendercut=0 off; bounce.wgsl sc_select): the cut's leaves (the same quarter a frame), then its nodes
+// (bounce.wgsl sc_now: all of them in a frame that re-selected the cut, else a quarter) into sc_L
+@group(0) @binding(81) var<storage, read> sc_list: array<u32>;
+@group(0) @binding(83) var<storage, read_write> sc_L: array<vec4f>;   // bounce.wgsl sc_X: per slot x 8, the faces' direct light at 6-7
+@compute @workgroup_size(64)
+fn direct_dirs_emit_sc(@builtin(global_invocation_id) gid: vec3u) {
+    if (gid.x >= sc_list[0]) { return; }
+    let g = sc_list[16u + gid.x];
+    if ((U.iso & 2u) != 0u && g % 4u != U.frame % 4u) { return; }
+    direct_dirs_one(g);
+}
+
+@compute @workgroup_size(64)
+fn direct_dirs_nodes_sc(@builtin(global_invocation_id) gid: vec3u) {
+    if (gid.x >= sc_list[1] || !(sc_list[9] != 0u || (U.iso & 2u) == 0u || gid.x % 4u == U.frame % 4u)) { return; }   // bounce.wgsl sc_now
+    let n = sc_list[16u + U.gaussian_count + gid.x];
+    let r = receiver(n);
+    let nd = nodes[n];
+    // the light each face catches (bounce.wgsl node_cut: a cut node is a two-sided flake, one colour per face of its
+    // short axis), before albedo and exposure: sum I V A T / d^2, matte (shininess left out of the senders)
+    var c = array<vec3f, 2>(vec3f(0.0), vec3f(0.0));
+    var stack: array<u32, ESTACK>;
+    stack[0] = EP.root;
+    var sp = 1u;
+    while (sp > 0u) {
+        sp -= 1u;
+        let e = emit_nodes[stack[sp]];
+        if (!use_node(e, r.P)) {
+            if (sp + 2u <= ESTACK) { stack[sp] = e.child_lo; stack[sp + 1u] = e.child_hi; sp += 2u; }
+            continue;
+        }
+        let d = e.mean - r.P;
+        let d2 = dot(d, d);
+        if (d2 < 1e-8) { continue; }
+        let ww = d / sqrt(d2);
+        let wi = xf_dir_inv(r.xf, ww);
+        let vi = vgrid_lookup(vgrid[n], wi);
+        if (vi <= 1e-7) { continue; }
+        let Tn = select(1.0, light_T(n, e.tag >> 16u), EP.lights != 0u);
+        let light = intensity(e, -ww) * (vi * footprint(nd, r.detC, wi) / d2 * Tn);
+        let h = 0.5 + 0.5 * sc_face(dot(wi, r.n));
+        c[0] += light * h;
+        c[1] += light * (1.0 - h);
+    }
+    let T = select(lamp_transmittance(n, 0u), 1.0, EP.lights != 0u);
+    sc_L[gid.x * 8u + 6u] = vec4f(c[0] * T, 0.0);
+    sc_L[gid.x * 8u + 7u] = vec4f(c[1] * T, 0.0);
+}
+
+fn direct_dirs_one(g: u32) {
     let r = receiver(g);
     var wo: array<vec3f, 15>;
     for (var k = 0u; k < 14u; k++) { wo[k] = DIRS14[k]; }
     let c = shade_emitters(g, r, wo, 14u, false);
-    for (var k = 0u; k < 14u; k++) { lo_dir[g * 14u + k] = vec4f(c[k], 0.0); }
+    // one value toward the probes (common.wgsl LOB): matte ones have the same in every slot; a shiny one's mean
+    // weighted as bounce.wgsl node_leaf weights the directions (footprint x V), so its total into the tree is kept
+    var mean = vec3f(0.0);
+    var ws = 0.0;
+    let nd = nodes[g];
+    for (var k = 0u; k < 14u; k++) {
+        let u = xf_dir_inv(r.xf, DIRS14[k]);
+        let w = footprint(nd, r.detC, u) * vgrid_lookup(vgrid[g], u);
+        mean += c[k] * w; ws += w;
+    }
+    lo_dir[g] = vec4f(select(c[0], mean / max(ws, 1e-20), ws > 0.0), 0.0);
 }

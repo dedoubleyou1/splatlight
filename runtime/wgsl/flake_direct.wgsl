@@ -5,7 +5,7 @@
 //   flake_direct  per matte Gaussian: shade_emit's emitter cut with the flake lobe toward the eye, added
 // and once per asset flake_expo (the SH2 of A V that normalises the lobe).
 
-@group(0) @binding(14) var<storage, read> lo_b: array<vec4f>;   // bounce.wgsl's, [14] = toward the eye
+@group(0) @binding(14) var<storage, read> lo_b: array<vec4f>;   // bounce.wgsl's (common.wgsl LOB)
 
 // Per Gaussian, once: SH2 of A(w) V(w) over the 8 x 16 V-grid cells, rest frame (iso_init.wgsl's quadrature).
 @compute @workgroup_size(64)
@@ -39,7 +39,7 @@ fn flake_base(@builtin(global_invocation_id) gid: vec3u) {
     let g = gid.x;
     if (g >= FP.count) { return; }
     let mat = materials[min(gaussians[g].flags & 0xFFFFu, max(FP.material_count, 1u) - 1u)];
-    let b = FP.gain * lo_b[g * 15u + 14u].rgb;
+    let b = FP.gain * lo_b[g * LOB + LOB_EYE].rgb;
     if (spec_weight(mat) > 0.0 || (mat.flags & 3u) != 0u) {
         cam[g] = vec4f(colour[g].rgb + b, 0.0);
         return;

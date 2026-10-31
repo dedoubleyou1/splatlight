@@ -1,0 +1,1703 @@
+{
+ "format": "gs-runtime",
+ "version": "0.2",
+ "spec": "runtime/SPEC.md",
+ "buffers": {
+  "gaussians": {
+   "file": "gaussians.bin",
+   "count": 362953,
+   "stride": 64,
+   "fields": {
+    "mu": {
+     "offset": 0,
+     "type": "f32x3"
+    },
+    "kappa": {
+     "offset": 12,
+     "type": "f32"
+    },
+    "quat": {
+     "offset": 16,
+     "type": "f32x4"
+    },
+    "scale": {
+     "offset": 32,
+     "type": "f32x3"
+    },
+    "part_surface": {
+     "offset": 44,
+     "type": "u32"
+    },
+    "albedo": {
+     "offset": 48,
+     "type": "f32x3"
+    },
+    "flags": {
+     "offset": 60,
+     "type": "u32"
+    }
+   }
+  },
+  "nodes": {
+   "file": "nodes.bin",
+   "count": 725891,
+   "stride": 96,
+   "fields": {
+    "mean": {
+     "offset": 0,
+     "type": "f32x3"
+    },
+    "radius": {
+     "offset": 12,
+     "type": "f32"
+    },
+    "cinv_diag": {
+     "offset": 16,
+     "type": "f32x3"
+    },
+    "kappa": {
+     "offset": 28,
+     "type": "f32"
+    },
+    "cinv_off": {
+     "offset": 32,
+     "type": "f32x3"
+    },
+    "smax": {
+     "offset": 44,
+     "type": "f32"
+    },
+    "sn_diag": {
+     "offset": 48,
+     "type": "f32x3"
+    },
+    "part": {
+     "offset": 60,
+     "type": "u32"
+    },
+    "sn_off": {
+     "offset": 64,
+     "type": "f32x3"
+    },
+    "child_lo": {
+     "offset": 76,
+     "type": "u32"
+    },
+    "child_hi": {
+     "offset": 80,
+     "type": "u32"
+    },
+    "depth": {
+     "offset": 84,
+     "type": "u32"
+    }
+   }
+  },
+  "kids": {
+   "file": "kids.bin",
+   "count": 725890,
+   "stride": 4,
+   "fields": {
+    "child": {
+     "offset": 0,
+     "type": "u32"
+    }
+   }
+  },
+  "vgrid": {
+   "file": "vgrid.bin",
+   "count": 362953,
+   "stride": 128,
+   "fields": {
+    "v": {
+     "offset": 0,
+     "type": "u32x32"
+    }
+   }
+  },
+  "parts": {
+   "file": "parts.bin",
+   "count": 16,
+   "stride": 128,
+   "fields": {
+    "xf": {
+     "offset": 0,
+     "type": "f32x12"
+    },
+    "xf_prev": {
+     "offset": 48,
+     "type": "f32x12"
+    },
+    "bound": {
+     "offset": 96,
+     "type": "f32x4"
+    },
+    "root": {
+     "offset": 112,
+     "type": "u32"
+    },
+    "g_lo": {
+     "offset": 116,
+     "type": "u32"
+    },
+    "g_hi": {
+     "offset": 120,
+     "type": "u32"
+    },
+    "flags": {
+     "offset": 124,
+     "type": "u32"
+    }
+   }
+  },
+  "lamps": {
+   "file": "lamps.bin",
+   "count": 1,
+   "stride": 96,
+   "fields": {
+    "center": {
+     "offset": 0,
+     "type": "f32x3"
+    },
+    "kind": {
+     "offset": 12,
+     "type": "u32"
+    },
+    "e1": {
+     "offset": 16,
+     "type": "f32x3"
+    },
+    "radius": {
+     "offset": 28,
+     "type": "f32"
+    },
+    "e2": {
+     "offset": 32,
+     "type": "f32x3"
+    },
+    "range": {
+     "offset": 44,
+     "type": "f32"
+    },
+    "normal": {
+     "offset": 48,
+     "type": "f32x3"
+    },
+    "flags": {
+     "offset": 60,
+     "type": "u32"
+    },
+    "radiance": {
+     "offset": 64,
+     "type": "f32x3"
+    },
+    "center_prev": {
+     "offset": 80,
+     "type": "f32x3"
+    }
+   }
+  },
+  "materials": {
+   "file": "materials.bin",
+   "count": 7,
+   "stride": 32,
+   "fields": {
+    "flake": {
+     "offset": 0,
+     "type": "f32x3"
+    },
+    "phase_samples": {
+     "offset": 12,
+     "type": "u32"
+    },
+    "vfloor": {
+     "offset": 16,
+     "type": "f32"
+    },
+    "flags": {
+     "offset": 20,
+     "type": "u32"
+    },
+    "pad0": {
+     "offset": 24,
+     "type": "u32"
+    },
+    "pad1": {
+     "offset": 28,
+     "type": "u32"
+    }
+   }
+  }
+ },
+ "name": "hill_lite_bin_m50",
+ "gaussian_count": 362953,
+ "node_count": 725891,
+ "part_count": 16,
+ "lamp_count": 1,
+ "frame": "right-handed, z up, metres (protocol v0.4)",
+ "parts": [
+  {
+   "index": 0,
+   "name": "ground",
+   "root": 397140,
+   "gaussians": [
+    0,
+    34189
+   ],
+   "static": true,
+   "mobility": "static",
+   "rig_name": null
+  },
+  {
+   "index": 1,
+   "name": "grass",
+   "root": 542554,
+   "gaussians": [
+    34189,
+    179604
+   ],
+   "static": true,
+   "mobility": "static",
+   "rig_name": null
+  },
+  {
+   "index": 2,
+   "name": "tree",
+   "root": 678859,
+   "gaussians": [
+    179604,
+    315910
+   ],
+   "static": true,
+   "mobility": "static",
+   "rig_name": null
+  },
+  {
+   "index": 3,
+   "name": "cloud_0",
+   "root": 683377,
+   "gaussians": [
+    315910,
+    320429
+   ],
+   "static": false,
+   "mobility": "movable",
+   "rig_name": null
+  },
+  {
+   "index": 4,
+   "name": "cloud_1",
+   "root": 686730,
+   "gaussians": [
+    320429,
+    323783
+   ],
+   "static": false,
+   "mobility": "movable",
+   "rig_name": null
+  },
+  {
+   "index": 5,
+   "name": "cloud_2",
+   "root": 690676,
+   "gaussians": [
+    323783,
+    327730
+   ],
+   "static": false,
+   "mobility": "movable",
+   "rig_name": null
+  },
+  {
+   "index": 6,
+   "name": "cloud_3",
+   "root": 694948,
+   "gaussians": [
+    327730,
+    332003
+   ],
+   "static": false,
+   "mobility": "movable",
+   "rig_name": null
+  },
+  {
+   "index": 7,
+   "name": "cloud_4",
+   "root": 699684,
+   "gaussians": [
+    332003,
+    336740
+   ],
+   "static": false,
+   "mobility": "movable",
+   "rig_name": null
+  },
+  {
+   "index": 8,
+   "name": "cloud_5",
+   "root": 702143,
+   "gaussians": [
+    336740,
+    339200
+   ],
+   "static": false,
+   "mobility": "movable",
+   "rig_name": null
+  },
+  {
+   "index": 9,
+   "name": "cloud_6",
+   "root": 704980,
+   "gaussians": [
+    339200,
+    342038
+   ],
+   "static": false,
+   "mobility": "movable",
+   "rig_name": null
+  },
+  {
+   "index": 10,
+   "name": "cloud_7",
+   "root": 708005,
+   "gaussians": [
+    342038,
+    345064
+   ],
+   "static": false,
+   "mobility": "movable",
+   "rig_name": null
+  },
+  {
+   "index": 11,
+   "name": "cloud_8",
+   "root": 711404,
+   "gaussians": [
+    345064,
+    348464
+   ],
+   "static": false,
+   "mobility": "movable",
+   "rig_name": null
+  },
+  {
+   "index": 12,
+   "name": "cloud_9",
+   "root": 714952,
+   "gaussians": [
+    348464,
+    352013
+   ],
+   "static": false,
+   "mobility": "movable",
+   "rig_name": null
+  },
+  {
+   "index": 13,
+   "name": "cloud_10",
+   "root": 718423,
+   "gaussians": [
+    352013,
+    355485
+   ],
+   "static": false,
+   "mobility": "movable",
+   "rig_name": null
+  },
+  {
+   "index": 14,
+   "name": "cloud_11",
+   "root": 722244,
+   "gaussians": [
+    355485,
+    359307
+   ],
+   "static": false,
+   "mobility": "movable",
+   "rig_name": null
+  },
+  {
+   "index": 15,
+   "name": "cloud_12",
+   "root": 725889,
+   "gaussians": [
+    359307,
+    362953
+   ],
+   "static": false,
+   "mobility": "movable",
+   "rig_name": null
+  }
+ ],
+ "scene_root": 725890,
+ "lamps": [
+  {
+   "name": "placeholder",
+   "kind": "sphere",
+   "enabled": false
+  }
+ ],
+ "camera": {
+  "model": "pinhole, OpenCV axes (protocol 2)",
+  "eye": [
+   2.0,
+   -18.0,
+   1.7
+  ],
+  "look_at": [
+   -1.8,
+   0.0,
+   6.0
+  ],
+  "up": [
+   0,
+   0,
+   1
+  ],
+  "fov_deg": 44.457722167320206,
+  "resolution": [
+   1600,
+   900
+  ]
+ },
+ "views": {
+  "hero": {
+   "eye": [
+    2.0,
+    -18.0,
+    1.7
+   ],
+   "look_at": [
+    -1.8,
+    0.0,
+    6.0
+   ],
+   "hfov_deg": 72.0
+  },
+  "front": {
+   "eye": [
+    -3.0,
+    17.0,
+    1.8
+   ],
+   "look_at": [
+    0.5,
+    0.0,
+    3.8
+   ],
+   "hfov_deg": 65.0
+  },
+  "tree": {
+   "eye": [
+    3.2,
+    -3.4,
+    3.7
+   ],
+   "look_at": [
+    -0.3,
+    0.3,
+    6.2
+   ],
+   "hfov_deg": 75.0
+  },
+  "grass": {
+   "eye": [
+    1.5,
+    -9.0,
+    2.35
+   ],
+   "look_at": [
+    0.0,
+    0.0,
+    3.2
+   ],
+   "hfov_deg": 55.0
+  }
+ },
+ "bounds": {
+  "lo": [
+   -59.250999450683594,
+   -41.75400161743164,
+   -0.6899999976158142
+  ],
+  "hi": [
+   54.308998107910156,
+   53.505001068115234,
+   24.45400047302246
+  ]
+ },
+ "environment": {
+  "sky": {
+   "bands": 4,
+   "sh_rgb": [
+    [
+     0.466297,
+     0.615292,
+     0.597546
+    ],
+    [
+     0.158101,
+     0.178192,
+     0.194621
+    ],
+    [
+     0.00707,
+     0.024805,
+     0.246822
+    ],
+    [
+     -0.09128,
+     -0.10288,
+     -0.112365
+    ],
+    [
+     -0.07745,
+     -0.088715,
+     -0.097605
+    ],
+    [
+     0.067649,
+     0.080477,
+     0.096071
+    ],
+    [
+     -0.072231,
+     -0.084296,
+     -0.083744
+    ],
+    [
+     -0.039057,
+     -0.046463,
+     -0.055466
+    ],
+    [
+     -0.044716,
+     -0.05122,
+     -0.056352
+    ],
+    [
+     0.0,
+     0.0,
+     0.0
+    ],
+    [
+     -0.017885,
+     -0.0212,
+     -0.02483
+    ],
+    [
+     -0.005771,
+     -0.004822,
+     -0.001767
+    ],
+    [
+     -0.015669,
+     -0.020905,
+     -0.039154
+    ],
+    [
+     0.003332,
+     0.002784,
+     0.00102
+    ],
+    [
+     -0.010326,
+     -0.01224,
+     -0.014336
+    ],
+    [
+     0.016579,
+     0.017966,
+     0.01811
+    ]
+   ],
+   "background_bands": 9,
+   "background_sh_rgb": [
+    [
+     0.330428,
+     0.505944,
+     0.807119
+    ],
+    [
+     0.1428,
+     0.171501,
+     0.199867
+    ],
+    [
+     -0.0,
+     -0.0,
+     -0.0
+    ],
+    [
+     -0.078521,
+     -0.095289,
+     -0.109883
+    ],
+    [
+     -0.089131,
+     -0.111493,
+     -0.140257
+    ],
+    [
+     -0.0,
+     -0.0,
+     0.0
+    ],
+    [
+     -0.126908,
+     -0.178405,
+     -0.223086
+    ],
+    [
+     0.0,
+     0.0,
+     0.0
+    ],
+    [
+     -0.058176,
+     -0.071351,
+     -0.089543
+    ],
+    [
+     -0.006043,
+     -0.00666,
+     -0.006448
+    ],
+    [
+     0.0,
+     0.0,
+     0.0
+    ],
+    [
+     -0.038938,
+     -0.040966,
+     -0.031937
+    ],
+    [
+     0.0,
+     -0.0,
+     0.0
+    ],
+    [
+     0.019911,
+     0.021212,
+     0.014831
+    ],
+    [
+     0.0,
+     -0.0,
+     0.0
+    ],
+    [
+     0.045965,
+     0.046783,
+     0.038429
+    ],
+    [
+     0.031039,
+     0.028628,
+     0.017933
+    ],
+    [
+     0.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.022918,
+     0.028543,
+     0.035883
+    ],
+    [
+     0.0,
+     -0.0,
+     -0.0
+    ],
+    [
+     0.036527,
+     0.048197,
+     0.049259
+    ],
+    [
+     0.0,
+     -0.0,
+     0.0
+    ],
+    [
+     0.016598,
+     0.019978,
+     0.025011
+    ],
+    [
+     -0.0,
+     0.0,
+     -0.0
+    ],
+    [
+     -0.01027,
+     -0.009588,
+     -0.00477
+    ],
+    [
+     -0.013086,
+     -0.011709,
+     -0.006418
+    ],
+    [
+     -0.0,
+     -0.0,
+     0.0
+    ],
+    [
+     0.002318,
+     0.002555,
+     0.002474
+    ],
+    [
+     -0.0,
+     0.0,
+     -0.0
+    ],
+    [
+     0.008543,
+     0.00972,
+     0.010551
+    ],
+    [
+     -0.0,
+     -0.0,
+     0.0
+    ],
+    [
+     -0.003759,
+     -0.004498,
+     -0.004444
+    ],
+    [
+     -0.0,
+     0.0,
+     0.0
+    ],
+    [
+     -0.014616,
+     -0.017989,
+     -0.023461
+    ],
+    [
+     -0.0,
+     0.0,
+     0.0
+    ],
+    [
+     -0.012636,
+     -0.011094,
+     -0.005883
+    ],
+    [
+     -0.001819,
+     -0.001667,
+     -0.000933
+    ],
+    [
+     0.0,
+     0.0,
+     0.0
+    ],
+    [
+     -0.008009,
+     -0.008838,
+     -0.009871
+    ],
+    [
+     0.0,
+     0.0,
+     0.0
+    ],
+    [
+     -0.000616,
+     -0.001049,
+     -0.002694
+    ],
+    [
+     -0.0,
+     -0.0,
+     -0.0
+    ],
+    [
+     -0.003382,
+     -0.003112,
+     0.001017
+    ],
+    [
+     0.0,
+     0.0,
+     0.0
+    ],
+    [
+     -0.001481,
+     -0.001775,
+     -0.002991
+    ],
+    [
+     0.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.002492,
+     0.003169,
+     0.004143
+    ],
+    [
+     0.0,
+     -0.0,
+     -0.0
+    ],
+    [
+     0.007561,
+     0.006897,
+     0.00394
+    ],
+    [
+     0.002243,
+     0.002075,
+     0.001329
+    ],
+    [
+     0.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.001718,
+     0.001993,
+     0.00252
+    ],
+    [
+     -0.0,
+     0.0,
+     0.0
+    ],
+    [
+     -0.00049,
+     -0.00054,
+     -0.000523
+    ],
+    [
+     0.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.001123,
+     0.001572,
+     0.001965
+    ],
+    [
+     0.0,
+     0.0,
+     0.0
+    ],
+    [
+     -0.000904,
+     -0.001151,
+     -0.001494
+    ],
+    [
+     0.0,
+     0.0,
+     0.0
+    ],
+    [
+     -0.000439,
+     -0.000294,
+     0.000512
+    ],
+    [
+     -0.0,
+     -0.0,
+     -0.0
+    ],
+    [
+     0.001883,
+     0.001911,
+     0.001837
+    ],
+    [
+     -0.0,
+     -0.0,
+     -0.0
+    ],
+    [
+     -0.000958,
+     -0.000917,
+     -0.000605
+    ],
+    [
+     -0.000384,
+     -0.000373,
+     -0.000276
+    ],
+    [
+     -0.0,
+     -0.0,
+     -0.0
+    ],
+    [
+     0.000129,
+     0.000118,
+     6.6e-05
+    ],
+    [
+     0.0,
+     -0.0,
+     -0.0
+    ],
+    [
+     -2.9e-05,
+     -9.6e-05,
+     -0.000139
+    ],
+    [
+     0.0,
+     0.0,
+     0.0
+    ],
+    [
+     -0.000547,
+     -0.000719,
+     -0.000839
+    ],
+    [
+     0.0,
+     0.0,
+     0.0
+    ],
+    [
+     -0.000216,
+     -0.00063,
+     -0.001473
+    ],
+    [
+     -0.0,
+     -0.0,
+     -0.0
+    ],
+    [
+     -0.000215,
+     -0.000311,
+     -0.000356
+    ],
+    [
+     -0.0,
+     -0.0,
+     -0.0
+    ],
+    [
+     0.0002,
+     0.000222,
+     0.000214
+    ],
+    [
+     0.0,
+     0.0,
+     0.0
+    ],
+    [
+     -0.000208,
+     -0.000247,
+     -0.000336
+    ],
+    [
+     0.0,
+     0.0,
+     0.0
+    ],
+    [
+     -0.000281,
+     -0.000267,
+     -0.00018
+    ]
+   ],
+   "horizon": {
+    "lobes": 8,
+    "along_deg": 25.0,
+    "across_deg": 8.0,
+    "rgb": [
+     [
+      0.07874,
+      0.062,
+      0.0
+     ],
+     [
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.27524,
+      0.22815,
+      0.07413
+     ],
+     [
+      0.55952,
+      0.48933,
+      0.26079
+     ],
+     [
+      0.0,
+      0.0,
+      0.0
+     ],
+     [
+      0.06692,
+      0.04593,
+      0.0
+     ],
+     [
+      0.08848,
+      0.08679,
+      0.02519
+     ],
+     [
+      0.09933,
+      0.09862,
+      0.04337
+     ]
+    ]
+   },
+   "ground_rgb": [
+    0.10361,
+    0.13571,
+    0.04856
+   ],
+   "glow": {
+    "irradiance_rgb": [
+     0.2241,
+     0.2658,
+     0.3175
+    ],
+    "angular_std_deg": 12.0,
+    "follows_sun": true
+   }
+  },
+  "lights": [
+   {
+    "name": "sun",
+    "dir": [
+     -0.433013,
+     0.75,
+     0.5
+    ],
+    "irradiance_rgb": [
+     4.74,
+     4.3575,
+     3.5963
+    ],
+    "angular_std_deg": 1.1,
+    "display_std_deg": 0.2,
+    "casts_shadows": true
+   }
+  ],
+  "note": "M49 clearsky30_crisp (David, 2026-10-31): M49 physical clear sky (very clear air): sun 30 deg up at the hill sun azimuth, aerosol optical depth 0.05 at 550 nm; spectral single scattering x1.3 (experiments/M49_clear_sky/atmosphere.py); sun luminance held at the hill's 4.38; glow round the sun drawn as a 12 deg SG (its light in the L3 sky), L8 background sky (display only); daylight white balance (60 deg sun + sky -> neutral), gains [0.8588, 1.0, 1.1584]; old sky: env/hill_old.json"
+ },
+ "shading": {
+  "recipe": "M39 direction-independent transfer; environment lights (SPEC 2.9)"
+ },
+ "walk": {
+  "theta": 8.0,
+  "stack": 64,
+  "max_fanout": 2,
+  "max_depth": 29
+ },
+ "vgrid": {
+  "rows": 8,
+  "cols": 16,
+  "bits": 8,
+  "source": "baked",
+  "gpu_bake": {
+   "parts": [
+    "tree",
+    "ground",
+    "grass"
+   ],
+   "rule": "M36 surf.bake rule 0 (light-space), 64 points",
+   "kernel": "experiments/M37_sdf_splats/gpu_bake/bake_v.wgsl",
+   "adapter": "Apple M4",
+   "seconds": 2165.59,
+   "per_part": {
+    "tree": {
+     "exclude": 0.0,
+     "kscale": 0.1,
+     "seconds": 1669.02
+    },
+    "ground": {
+     "exclude": 2.0,
+     "kscale": 0.5,
+     "seconds": 71.95
+    },
+    "grass": {
+     "exclude": 0.0,
+     "kscale": 1.0,
+     "seconds": 424.62
+    }
+   },
+   "note": "kscale: part density scaled for the V bake only (camera and shadow walk keep the asset density); exclude: --exclude Mahalanobis radius",
+   "clouds": {
+    "parts": [
+     "cloud_0",
+     "cloud_1",
+     "cloud_2",
+     "cloud_3",
+     "cloud_4",
+     "cloud_5",
+     "cloud_6",
+     "cloud_7",
+     "cloud_8",
+     "cloud_9",
+     "cloud_10",
+     "cloud_11",
+     "cloud_12"
+    ],
+    "rule": "M36 surf.bake rule 0 (light-space), 64 points",
+    "kernel": "experiments/M37_sdf_splats/gpu_bake/bake_v.wgsl",
+    "adapter": "Apple M4",
+    "seconds": 135.49,
+    "kmat": {
+     "cloud": 1.0
+    },
+    "note": "M50 drifting clouds, 2026-10-31, M4, bake_gpu.py --parts cloud_0..cloud_12 --kmat leaf=0.3 grass=0.3 flower=0.3; cloud density x1.0 for V only"
+   }
+  },
+  "translucency_bake": {
+   "tree": 0.1,
+   "ground": 0.5
+  }
+ },
+ "materials": [
+  {
+   "index": 0,
+   "name": "soil",
+   "kind": "flat",
+   "flake": [
+    1.0,
+    0.01,
+    0.01
+   ],
+   "phase_samples": 0,
+   "vfloor": 0.02,
+   "own_flakes": true,
+   "ui": true
+  },
+  {
+   "index": 1,
+   "name": "grass",
+   "kind": "soft_flat",
+   "flake": [
+    1.0,
+    0.09,
+    0.09
+   ],
+   "phase_samples": 8,
+   "vfloor": 0.02,
+   "own_flakes": true,
+   "ui": true
+  },
+  {
+   "index": 2,
+   "name": "flower",
+   "kind": "soft_flat",
+   "flake": [
+    1.0,
+    0.09,
+    0.09
+   ],
+   "phase_samples": 8,
+   "vfloor": 0.02,
+   "own_flakes": true,
+   "ui": true
+  },
+  {
+   "index": 3,
+   "name": "bark_soft_flat",
+   "kind": "soft_flat",
+   "flake": [
+    1.0,
+    0.09,
+    0.09
+   ],
+   "phase_samples": 8,
+   "vfloor": 0.02,
+   "own_flakes": true,
+   "ui": true
+  },
+  {
+   "index": 4,
+   "name": "bark_round",
+   "kind": "round",
+   "flake": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "phase_samples": 8,
+   "vfloor": 0.02,
+   "own_flakes": true,
+   "ui": true
+  },
+  {
+   "index": 5,
+   "name": "leaf",
+   "kind": "soft_flat",
+   "flake": [
+    1.0,
+    0.04,
+    0.04
+   ],
+   "phase_samples": 8,
+   "vfloor": 0.02,
+   "own_flakes": true,
+   "ui": true
+  },
+  {
+   "index": 6,
+   "name": "cloud",
+   "kind": "round",
+   "flake": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "phase_samples": 8,
+   "vfloor": 0.02,
+   "own_flakes": true,
+   "ui": true
+  }
+ ],
+ "provenance": {
+  "source": "experiments/M44_outdoor_hill (scene.py build, export.py)",
+  "tree": "runtime/export_room_big.build_levels: 8-ary Morton, extinction-law kappa (no fit)",
+  "note": "CPU previews and lighting reference: experiments/M44_outdoor_hill/results",
+  "clouds": "experiments/M50_drifting_clouds/replace_clouds.py"
+ },
+ "tree": {
+  "kind": "binary",
+  "builder": "runtime/bintree.py",
+  "source": "hill_lite_bin (static parts) + replace_clouds.py puffs",
+  "max_depth_cap": 32
+ },
+ "clouds": {
+  "note": "M50 drifting clouds (experiments/M50_drifting_clouds/replace_clouds.py, David 2026-10-31): 13 movable parts of 2-3 sparse puffs (rho0 0.7), replacing M44's 8 clouds; the renderer drifts them along the wind and fades / wraps them at the field edge",
+  "field_radius_m": 58.0,
+  "source": "hill_lite_bin",
+  "layout": [
+   {
+    "part": "cloud_0",
+    "centre": [
+     13.4,
+     2.72,
+     17.84
+    ],
+    "puffs": [
+     {
+      "centre": [
+       13.4,
+       2.72,
+       17.84
+      ],
+      "size": 0.795
+     },
+     {
+      "centre": [
+       23.39,
+       7.04,
+       18.0
+      ],
+      "size": 0.601
+     },
+     {
+      "centre": [
+       21.97,
+       2.0,
+       17.53
+      ],
+      "size": 0.582
+     }
+    ],
+    "gaussians": 4519
+   },
+   {
+    "part": "cloud_1",
+    "centre": [
+     -9.38,
+     13.82,
+     20.89
+    ],
+    "puffs": [
+     {
+      "centre": [
+       -9.38,
+       13.82,
+       20.89
+      ],
+      "size": 0.716
+     },
+     {
+      "centre": [
+       2.92,
+       14.99,
+       21.19
+      ],
+      "size": 0.605
+     }
+    ],
+    "gaussians": 3354
+   },
+   {
+    "part": "cloud_2",
+    "centre": [
+     5.13,
+     -23.88,
+     14.43
+    ],
+    "puffs": [
+     {
+      "centre": [
+       5.13,
+       -23.88,
+       14.43
+      ],
+      "size": 0.647
+     },
+     {
+      "centre": [
+       0.37,
+       -15.44,
+       15.25
+      ],
+      "size": 0.618
+     },
+     {
+      "centre": [
+       13.39,
+       -15.63,
+       14.67
+      ],
+      "size": 0.677
+     }
+    ],
+    "gaussians": 3947
+   },
+   {
+    "part": "cloud_3",
+    "centre": [
+     25.34,
+     18.82,
+     15.24
+    ],
+    "puffs": [
+     {
+      "centre": [
+       25.34,
+       18.82,
+       15.24
+      ],
+      "size": 0.722
+     },
+     {
+      "centre": [
+       17.12,
+       21.4,
+       16.42
+      ],
+      "size": 0.716
+     }
+    ],
+    "gaussians": 4273
+   },
+   {
+    "part": "cloud_4",
+    "centre": [
+     -29.65,
+     -5.5,
+     20.51
+    ],
+    "puffs": [
+     {
+      "centre": [
+       -29.65,
+       -5.5,
+       20.51
+      ],
+      "size": 0.67
+     },
+     {
+      "centre": [
+       -26.53,
+       -14.18,
+       20.33
+      ],
+      "size": 0.726
+     },
+     {
+      "centre": [
+       -36.64,
+       -1.33,
+       20.26
+      ],
+      "size": 0.658
+     }
+    ],
+    "gaussians": 4737
+   },
+   {
+    "part": "cloud_5",
+    "centre": [
+     28.51,
+     -24.69,
+     20.0
+    ],
+    "puffs": [
+     {
+      "centre": [
+       28.51,
+       -24.69,
+       20.0
+      ],
+      "size": 0.702
+     },
+     {
+      "centre": [
+       33.89,
+       -31.1,
+       21.46
+      ],
+      "size": 0.507
+     }
+    ],
+    "gaussians": 2460
+   },
+   {
+    "part": "cloud_6",
+    "centre": [
+     -11.28,
+     36.92,
+     16.63
+    ],
+    "puffs": [
+     {
+      "centre": [
+       -11.28,
+       36.92,
+       16.63
+      ],
+      "size": 0.774
+     },
+     {
+      "centre": [
+       -21.24,
+       38.04,
+       17.73
+      ],
+      "size": 0.609
+     }
+    ],
+    "gaussians": 2838
+   },
+   {
+    "part": "cloud_7",
+    "centre": [
+     -29.79,
+     -33.38,
+     19.3
+    ],
+    "puffs": [
+     {
+      "centre": [
+       -29.79,
+       -33.38,
+       19.3
+      ],
+      "size": 0.615
+     },
+     {
+      "centre": [
+       -34.16,
+       -39.0,
+       18.09
+      ],
+      "size": 0.671
+     }
+    ],
+    "gaussians": 3026
+   },
+   {
+    "part": "cloud_8",
+    "centre": [
+     38.59,
+     24.32,
+     14.56
+    ],
+    "puffs": [
+     {
+      "centre": [
+       38.59,
+       24.32,
+       14.56
+      ],
+      "size": 0.637
+     },
+     {
+      "centre": [
+       49.46,
+       28.9,
+       16.01
+      ],
+      "size": 0.648
+     },
+     {
+      "centre": [
+       32.16,
+       17.4,
+       15.92
+      ],
+      "size": 0.553
+     }
+    ],
+    "gaussians": 3400
+   },
+   {
+    "part": "cloud_9",
+    "centre": [
+     -40.94,
+     22.78,
+     14.41
+    ],
+    "puffs": [
+     {
+      "centre": [
+       -40.94,
+       22.78,
+       14.41
+      ],
+      "size": 0.658
+     },
+     {
+      "centre": [
+       -35.88,
+       31.52,
+       15.77
+      ],
+      "size": 0.721
+     }
+    ],
+    "gaussians": 3549
+   },
+   {
+    "part": "cloud_10",
+    "centre": [
+     32.57,
+     -38.88,
+     14.94
+    ],
+    "puffs": [
+     {
+      "centre": [
+       32.57,
+       -38.88,
+       14.94
+      ],
+      "size": 0.666
+     },
+     {
+      "centre": [
+       42.66,
+       -33.48,
+       13.96
+      ],
+      "size": 0.64
+     },
+     {
+      "centre": [
+       20.55,
+       -37.67,
+       15.26
+      ],
+      "size": 0.504
+     }
+    ],
+    "gaussians": 3472
+   },
+   {
+    "part": "cloud_11",
+    "centre": [
+     12.32,
+     50.77,
+     14.86
+    ],
+    "puffs": [
+     {
+      "centre": [
+       12.32,
+       50.77,
+       14.86
+      ],
+      "size": 0.622
+     },
+     {
+      "centre": [
+       7.93,
+       44.51,
+       16.34
+      ],
+      "size": 0.677
+     },
+     {
+      "centre": [
+       9.46,
+       43.14,
+       15.02
+      ],
+      "size": 0.524
+     }
+    ],
+    "gaussians": 3822
+   },
+   {
+    "part": "cloud_12",
+    "centre": [
+     -52.91,
+     -14.96,
+     15.6
+    ],
+    "puffs": [
+     {
+      "centre": [
+       -52.91,
+       -14.96,
+       15.6
+      ],
+      "size": 0.669
+     },
+     {
+      "centre": [
+       -55.31,
+       -8.07,
+       14.71
+      ],
+      "size": 0.542
+     },
+     {
+      "centre": [
+       -54.99,
+       -22.64,
+       15.49
+      ],
+      "size": 0.627
+     }
+    ],
+    "gaussians": 3646
+   }
+  ]
+ }
+}

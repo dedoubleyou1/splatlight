@@ -37,6 +37,8 @@ const WORDS: u32 = THREADS / 32u;      // 8 mask words per digit per batch
 
 // Scene Gaussians, the unused slot at `count`, then the emissive Gaussians: the same range scatter.wgsl sorts.
 fn element_count() -> u32 {
+  // Gaussian particles (frame.particles) take the last slots, after everything else
+  if (frame.particles.y != 0u) { return frame.particles.x + frame.particles.y; }
   // with screen-space LOD (frame.lod) the tree's internal nodes follow at lod.y (project.wgsl)
   if (frame.lod.x != 0u) { return frame.lod.y + frame.lod.z; }
   return frame.count + 1u + u32(frame.palette[3].y);

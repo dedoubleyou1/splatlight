@@ -4,84 +4,39 @@
 // shared with the native runner (runtime/run_kernels.py), unchanged.
 
 import { Lights, MAX_LIGHTS } from './lights.js';
+import { LightsMap } from './lights_map.js';
 
-export const KERNELS = [['walk_lamp', 'walk_lamp'], ['ema', 'ema'], ['shade', 'shade']];
+// per-Gaussian kernels built from their own files: none left. The analytic lamp (walk_lamp, shade) and the sampled
+// shadow walk with its history (walk_emit, ema, shadow_cull) were removed 2026-10-29 (David); their WGSL stays for
+// the native harness and experiments.
+export const KERNELS = [];
 // Probe-loop bounce (runtime/wgsl/bounce.wgsl): entry points in dispatch order, and the bindings each one uses.
 const BOUNCE = {
-  near_vis: [0, 1, 2, 3, 4, 9, 10, 12, 27],
-  direct_dirs: [0, 1, 2, 3, 4, 5, 6, 7, 10, 13],
   bounce_dirs: [0, 1, 2, 3, 4, 7, 10, 11, 12, 14],
-  node_leaf: [0, 1, 2, 3, 4, 10, 13, 14, 15],
-  node_up: [0, 2, 9, 10, 15, 17, 29],
-  node_sh2: [10, 15, 16],
-  probe_gather: [0, 2, 3, 4, 5, 9, 10, 11, 16, 40],   // 40: the environment (sky for rays that leave the scene)
+  node_leaf: [0, 1, 2, 3, 4, 10, 13, 14, 15, 80],   // 80: the tree slots (sc_flag, bounce.wgsl tree_slot)
+  node_up: [0, 2, 9, 10, 15, 17, 29, 80],
+  node_sh2: [10, 15, 16, 80],
+  probe_gather: [0, 2, 3, 4, 5, 9, 10, 11, 16, 40, 80],   // 40: the environment (sky for rays that leave the scene)
   probe_valid: [0, 4, 10, 11],
   // M39 stage 2 (SH2 probes)
   iso_xfer: [0, 1, 2, 3, 4, 10, 12, 26],
-  bounce_sh: [0, 1, 2, 4, 7, 10, 11, 14, 25, 26],
+  bounce_sh: [0, 1, 2, 3, 4, 7, 10, 11, 14, 25, 26],
   probe_sh2: [10, 11, 25],
   // near-field reflection (off by default; setNearReflection)
-  near_refl: [0, 1, 2, 7, 8, 10, 14, 16, 27, 28],
-  // near-field cones (prototype, off by default; setNearCones): replaces near_vis, same output
+  near_refl: [0, 1, 2, 7, 8, 10, 14, 16, 27, 28, 80],
+  // near-field visibility (with nearField on, off by default): k wide cones per Gaussian (the 128-cell near_vis walk
+  // was archived 2026-10-29; its WGSL stays)
   near_cones: [0, 1, 2, 3, 4, 9, 10, 12, 27],
 };
 export const BOUNCE_TIMERS = ['near_vis', 'direct_dirs', 'bounce_dirs', 'node_leaf', 'probe_gather', 'iso_xfer', 'bounce_sh', 'probe_sh2'];
 // Emissive Gaussian lights (runtime/wgsl/emissive.wgsl): entry -> bindings, and the timer slot each one reports into.
 const EMISSIVE = {
-  walk_emit: [[0, 1, 2, 3, 4, 9, 18, 19, 20, 33], 'walk_lamp'],
   shade_emit: [[0, 1, 2, 3, 4, 6, 7, 8, 18, 19], 'shade'],
   direct_dirs_emit: [[0, 1, 2, 3, 4, 6, 7, 13, 18, 19], 'direct_dirs'],
 };
-// Option B field shadows (?shadow=pfd, emissive.wgsl pfd_T): the emissive module with shade_emitters' two lamp_state
-// readers replaced (unified per-light T -> pfd_T, the single lamp's T -> 1). Throws if the source no longer matches.
-// mode 'rcd' / 'pxd' (occluder proxies, emissive.wgsl rcd_tau / pxd_tau) swaps the field lookup in pfd_T_core;
-// 'rcc' / 'pxc' do the same per receiver cluster (cluster_T, pxc_T); colour.w then holds cluster hits x 1024 +
-// direct T evaluations (fallbacks).
-export function pfdSource(sources, split = true, mode = 'pfd') {
-  let src = sources.emissive;
-  if (!split) src = src.replace('var<private> pfd_nsel: u32;', 'var<private> pfd_nsel: u32 = PFD_ALL;');
-  const tauFn = { rcd: 'rcd', pxd: 'pxd', rcc: 'rcd', pxc: 'pxd' }[mode];
-  const clustered = mode === 'rcc' || mode === 'pxc';
-  const swap = mode === 'pfd' ? [] : [['tau += max(pf_tau(p, xf_point_inv(xf, P), xf_dir_inv(xf, w), dist), 0.0);',
-    `tau += ${tauFn}_tau(p, xf_point_inv(xf, P), xf_dir_inv(xf, w), dist);`]];
-  if (clustered) swap.push(['let T = pfd_T_calc(g, P, e, ni);', 'let T = pxc_T(g, P, e, ni);'],
-    ['const PXC_NEAR: bool = false;', `const PXC_NEAR: bool = ${new URLSearchParams(globalThis.location?.search ?? '').get('pxcmiss') !== 'walk'};`]);
-  for (const [from, to] of [...swap,
-    ['light_T(g, e.tag >> 16u)', 'pfd_T(g, r.P, e, ni)'],
-    ['select(lamp_transmittance(g, 0u), 1.0, EP.lights != 0u)', '1.0'],
-    // the strongest-lights split: pick the nodes that get lookups before the cut walk
-    ['-> array<vec3f, 15> {\n    let nd = nodes[g];\n', '-> array<vec3f, 15> {\n    let nd = nodes[g];\n' + (split ? '    pfd_select(g, r, nout);\n' : '')],
-    // colour.w (not read downstream), for inspection: parts in the receiver's mask x 65536 + field T evaluations x 1024
-    // + parts that passed the per-node world cull
-    ['colour[g] = vec4f(c[0], 1.0);', clustered ? 'colour[g] = vec4f(c[0], f32(pxc_hit) * 1024.0 + f32(pfd_nlook));'
-      : 'colour[g] = vec4f(c[0], f32(countOneBits(pfd_mask)) * 65536.0 + f32(pfd_nlook) * 1024.0 + f32(pfd_npass));']]) {
-    if (src.split(from).length !== 2) throw new Error(`pfd: expected one '${from}' in emissive.wgsl`);
-    src = src.replace(from, to);
-  }
-  return sources.common + '\n' + sources.material_ext + '\n' + src;
-}
-// Hierarchical shadow walk (runtime/wgsl/shadow_cull.wgsl): entry -> bindings; 38 is the per-depth level uniform.
-const SHADOW_CULL = {
-  hs_box_leaf: [0, 1, 34],
-  hs_box_up: [0, 2, 9, 34, 35, 36, 38],
-  shadow_cull: [0, 2, 4, 9, 33, 34, 35, 36, 37, 38],
-};
-const HS_BUDGET = 4096;   // occluder nodes one hull test may visit before it gives up (the node then walks)
 const MAX_MATERIALS = 32;
-// Progressive tree lighting: entry -> bindings (progressive.wgsl), worklist size, fade-in frames.
-const PROGRESSIVE = {
-  lp_schedule: [0, 2, 4, 10, 21, 23, 24],
-  lp_finish: [21, 24],
-  lp_shade: [0, 2, 4, 9, 10, 11, 18, 19, 21, 22, 23, 24],
-  lp_transfer: [0, 1, 3, 4, 7, 8, 14, 19, 21, 22, 23],
-  lp_transfer_dirs: [0, 1, 3, 4, 7, 13, 14, 19, 21, 22, 23],
-  lp_iso_init: [0, 1, 3, 4, 7, 22],
-};
-const LP_MAX_BUDGET = 65536, LP_BLEND = 8;
+const LOB = 3;   // lo_b vec4s per Gaussian (common.wgsl LOB)
 // f32 -> IEEE half bits (for pack2x16float fields written from the host)
-// pfield.json's fingerprint (pf_export.py) against the one loadAsset took (asset.fingerprint)
-const sameFingerprint = (a, b) => !!a && a.count === b.count && a.bytes === b.bytes && a.hash === b.hash
-  && JSON.stringify(a.parts) === JSON.stringify(b.parts);
 
 function fromHalf(h) {
   const e = (h >> 10) & 31, m = h & 1023, s = h & 0x8000 ? -1 : 1;
@@ -95,7 +50,7 @@ function toHalf(v) {
   if (e >= 31) return s | 0x7c00;
   return s | (e << 10) | (m >>> 13);
 }
-const MAX_EMITTERS = 16384, EMITTERS_TARGET = 300, EMIT_THETA = 4;
+const MAX_EMITTERS = 16384, EMIT_THETA = 4;
 // Ein(3) = int_0^3 (1 - e^-x) / x dx: the footprint factor of a Gaussian at optical depth 3.
 const EIN3 = Array.from({ length: 3000 }, (_, i) => { const x = (i + 0.5) * 0.001; return (1 - Math.exp(-x)) / x * 0.001; })
   .reduce((acc, v) => acc + v, 0);
@@ -175,8 +130,9 @@ export function buildEmitterTree(rec, n) {
   const build = idx => {
     if (idx.length === 1) return write(leaf(idx[0]));
     const pos = i => [rec[i * 16], rec[i * 16 + 1], rec[i * 16 + 2]];
-    const lo = [0, 1, 2].map(k => Math.min(...idx.map(i => pos(i)[k])));
-    const hi = [0, 1, 2].map(k => Math.max(...idx.map(i => pos(i)[k])));
+    // loops, not Math.min(...array): spreading a large array overflows the call stack (2026-10-31)
+    const lo = [0, 1, 2].map(k => idx.reduce((m, i) => Math.min(m, pos(i)[k]), Infinity));
+    const hi = [0, 1, 2].map(k => idx.reduce((m, i) => Math.max(m, pos(i)[k]), -Infinity));
     const ax = [0, 1, 2].reduce((m, k) => (hi[k] - lo[k] > hi[m] - lo[m] ? k : m), 0);
     const sorted = [...idx].sort((p, q) => pos(p)[ax] - pos(q)[ax]);
     const half = sorted.length >> 1;
@@ -211,121 +167,13 @@ export function buildEmitterTree(rec, n) {
   const root = build(Array.from({ length: n }, (_, i) => i));
   return { nodes: f, root, cov };
 }
-
-// Rotation matrix columns (c0, c1, c2) -> quaternion x, y, z, w.
-function quatFromColumns(c0, c1, c2) {
-  const [m00, m10, m20] = c0, [m01, m11, m21] = c1, [m02, m12, m22] = c2;
-  const t = m00 + m11 + m22;
-  let x, y, z, w;
-  if (t > 0) { const k = 0.5 / Math.sqrt(t + 1); w = 0.25 / k; x = (m21 - m12) * k; y = (m02 - m20) * k; z = (m10 - m01) * k; }
-  else if (m00 > m11 && m00 > m22) { const k = 2 * Math.sqrt(1 + m00 - m11 - m22); w = (m21 - m12) / k; x = 0.25 * k; y = (m01 + m10) / k; z = (m02 + m20) / k; }
-  else if (m11 > m22) { const k = 2 * Math.sqrt(1 + m11 - m00 - m22); w = (m02 - m20) / k; x = (m01 + m10) / k; y = 0.25 * k; z = (m12 + m21) / k; }
-  else { const k = 2 * Math.sqrt(1 + m22 - m00 - m11); w = (m10 - m01) / k; x = (m02 + m20) / k; y = (m12 + m21) / k; z = 0.25 * k; }
-  const l = Math.hypot(x, y, z, w);
-  return [x / l, y / l, z / l, w / l];
-}
 // ProbeParams: 832 B, then dims (16), levels (64), ground (4096), static volumes (512 + 16) (bounce.wgsl; SPEC 2.7)
-// + node probes (256 vec4f, ?nodeprobes=1)
+// + node probes (256 vec4f, archived; bounce.wgsl ProbeParams.nodep stays, zero)
 const PROBE_PARAMS_BYTES = 832 + 16 + 64 + 4096 + 528 + 4096;
-// Node probes (David, 2026-10-28): a movable part's probes at the patches of its own split instead of a 2x2x2 cube
-// inside it (bounce.wgsl NODE_PROBES). ?nodeprobes=1 (prototype; progressive tree lighting still assumes 8 per part)
-const NODE_PROBES = new URLSearchParams(globalThis.location?.search ?? '').get('nodeprobes') === '1';
-const PPK = NODE_PROBES ? 16 : 8;   // probes per movable part
-export function nodeProbeSource(bounce) {
-  return NODE_PROBES ? bounce.replace('const PART_PROBES_PER: u32 = 8u;', `const PART_PROBES_PER: u32 = ${PPK}u;`)
-    .replace('const NODE_PROBES: bool = false;', 'const NODE_PROBES: bool = true;') : bounce;
-}
-
-// Per part, PPK probes in its rest frame: the part's Gaussian centres split (largest-variance axis, at the median)
-// until PPK groups; per group the flattest direction of its spread, oriented away from the part's centre, and the
-// probe 3 cm beyond the group's furthest centre along it; w = the blend radius (0.6 x the mean distance to the
-// nearest other probe of the part). Returns Float32Array [parts x PPK x 4].
-function nodeProbes(asset, k = PPK) {
-  const gf = new Float32Array(asset.gaussians), parts = asset.header.parts;
-  const out = new Float32Array(256 * 4);
-  parts.forEach((p, q) => {
-    if (q * k + k > 256) return;
-    const [g0, g1] = p.gaussians;
-    if (g1 - g0 < k) return;
-    const idx = Array.from({ length: g1 - g0 }, (_, i) => g0 + i);
-    const P = i => [gf[i * 16], gf[i * 16 + 1], gf[i * 16 + 2]];
-    const mean = ids => { const m = [0, 0, 0]; for (const i of ids) { const x = P(i); m[0] += x[0]; m[1] += x[1]; m[2] += x[2]; } return m.map(v => v / ids.length); };
-    const cov = (ids, m) => { const c = [0, 0, 0, 0, 0, 0]; for (const i of ids) { const x = P(i), d = [x[0] - m[0], x[1] - m[1], x[2] - m[2]];
-      c[0] += d[0] * d[0]; c[1] += d[1] * d[1]; c[2] += d[2] * d[2]; c[3] += d[0] * d[1]; c[4] += d[0] * d[2]; c[5] += d[1] * d[2]; } return c.map(v => v / ids.length); };
-    // first by facing: each Gaussian's short axis, signed away from the part's centre, binned into the 6 directions of the
-    // part's own principal axes (so a box's faces fall into separate groups, not corner pieces across its edges)
-    const pc0 = mean(idx), cp = cov(idx, pc0);
-    const Mp = [[cp[0], cp[3], cp[4]], [cp[3], cp[1], cp[5]], [cp[4], cp[5], cp[2]]];
-    const axes = [];
-    for (let a = 0; a < 3; a++) {                                   // principal axes by power iteration + deflation
-      let v = [[1, 0.3, 0.2], [0.2, 1, 0.3], [0.3, 0.2, 1]][a];
-      for (let it = 0; it < 60; it++) {
-        let w = [0, 1, 2].map(r => Mp[r][0] * v[0] + Mp[r][1] * v[1] + Mp[r][2] * v[2]);
-        for (const b of axes) { const d = w[0] * b[0] + w[1] * b[1] + w[2] * b[2]; w = w.map((x, c) => x - d * b[c]); }
-        const l = Math.hypot(...w) || 1; v = w.map(x => x / l);
-      }
-      axes.push(v);
-    }
-    const nrm = i => {
-      const q = [gf[i * 16 + 4], gf[i * 16 + 5], gf[i * 16 + 6], gf[i * 16 + 7]], [x, y, z, w] = q;
-      const n = [1 - 2 * (y * y + z * z), 2 * (x * y + w * z), 2 * (x * z - w * y)];
-      const d = [gf[i * 16] - pc0[0], gf[i * 16 + 1] - pc0[1], gf[i * 16 + 2] - pc0[2]];
-      return n[0] * d[0] + n[1] * d[1] + n[2] * d[2] < 0 ? n.map(v => -v) : n;
-    };
-    const bins = Array.from({ length: 6 }, () => []);
-    for (const i of idx) {
-      const n = nrm(i); let best = -2, bi = 0;
-      axes.forEach((a, j) => { const d = n[0] * a[0] + n[1] * a[1] + n[2] * a[2]; if (d > best) { best = d; bi = 2 * j; } if (-d > best) { best = -d; bi = 2 * j + 1; } });
-      bins[bi].push(i);
-    }
-    const groups = bins.filter(b => b.length >= Math.max(8, idx.length / (4 * k)));
-    for (const b of bins) if (b.length && !groups.includes(b)) groups[0]?.push(...b);   // tiny bins join the first
-    while (groups.length > k) groups.sort((a, b) => b.length - a.length).splice(-2, 2, [...groups.at(-2), ...groups.at(-1)]);
-    while (groups.length < k) {
-      let gi = 0; groups.forEach((g, i) => { if (g.length > groups[gi].length) gi = i; });
-      const g = groups[gi], m = mean(g), c = cov(g, m);
-      const ax = [c[0], c[1], c[2]].indexOf(Math.max(c[0], c[1], c[2]));
-      g.sort((a, b) => gf[a * 16 + ax] - gf[b * 16 + ax]);
-      groups.splice(gi, 1, g.slice(0, g.length >> 1), g.slice(g.length >> 1));
-    }
-    const pc = mean(idx), pos = [];
-    for (const g of groups) {
-      const m = mean(g), c = cov(g, m);
-      const M = [[c[0], c[3], c[4]], [c[3], c[1], c[5]], [c[4], c[5], c[2]]];
-      // flattest direction: power iteration on (tr I - M)
-      const tr = c[0] + c[1] + c[2];
-      let v = [1, 0.7, 0.3];
-      for (let it = 0; it < 60; it++) {
-        const w = [0, 1, 2].map(r => tr * v[r] - (M[r][0] * v[0] + M[r][1] * v[1] + M[r][2] * v[2]));
-        const l = Math.hypot(...w) || 1; v = w.map(x => x / l);
-      }
-      // facing: the group's mean signed short axis (falls back to the flattest direction, signed away from the centre)
-      const nm = [0, 0, 0]; for (const i of g) { const n = nrm(i); nm[0] += n[0]; nm[1] += n[1]; nm[2] += n[2]; }
-      const ln = Math.hypot(...nm);
-      if (ln > 0.3 * g.length) v = nm.map(x => x / ln);
-      else {
-        const away = [m[0] - pc[0], m[1] - pc[1], m[2] - pc[2]];
-        if (v[0] * away[0] + v[1] * away[1] + v[2] * away[2] < 0) v = v.map(x => -x);
-      }
-      let ext = 0;
-      for (const i of g) { const x = P(i); ext = Math.max(ext, (x[0] - m[0]) * v[0] + (x[1] - m[1]) * v[1] + (x[2] - m[2]) * v[2]); }
-      pos.push(m.map((x, a) => x + v[a] * (ext + 0.03)));
-    }
-    pos.forEach((x, j) => {
-      let dmin = Infinity;
-      pos.forEach((y, l) => { if (l !== j) dmin = Math.min(dmin, Math.hypot(x[0] - y[0], x[1] - y[1], x[2] - y[2])); });
-      out.set([...x, 0], 4 * (q * k + j));
-      out[4 * (q * k + j) + 3] = 0.6 * (isFinite(dmin) ? dmin : 0.3);
-    });
-  });
-  // one blend radius per part (the mean), so neighbouring probes overlap evenly
-  parts.forEach((p, q) => {
-    if (q * k + k > 256) return;
-    let s = 0; for (let j = 0; j < k; j++) s += out[4 * (q * k + j) + 3];
-    for (let j = 0; j < k; j++) out[4 * (q * k + j) + 3] = s / k;
-  });
-  return out;
-}
+// probes per movable part: a 2x2x2 cube in its rest frame (bounce.wgsl part_probe_frame). Node probes, one per tree
+// patch just outside the surface (?nodeprobes=1, 2026-10-28), were archived 2026-10-29 (David: revisit if the cube
+// doesn't suffice for moving characters); bounce.wgsl keeps its NODE_PROBES branch, off.
+const PPK = 8;
 const PROBES_AXIS = 8, NCELL = 128, HYSTERESIS = 0.5, PROBE_THETA = 4, TMAX = 6, NEAR_R = 0.3;
 // Lighting converges within a frame or two of a change (David, 2026-10-28: the one-frame convergence rule): every probe
 // and every bounce_dirs Gaussian refreshes every frame (?probesubset=4 = the old quarter a frame, ~2-5 ms cheaper on the
@@ -336,7 +184,6 @@ const SUBSET = Math.max(1, Number(new URLSearchParams(globalThis.location?.searc
 const PROBE_BLEND = new URLSearchParams(globalThis.location?.search ?? '').get('probeblend') ?? 'none';
 const probeAlpha = first => first ? 1 : PROBE_BLEND === 'fir' ? -1 : PROBE_BLEND === 'none' ? 1 : 1 - HYSTERESIS;
 const FULL_ROUNDS = 8;   // ...after the first rounds, which refresh everything so the probes settle in a few frames
-const NEAR_CHUNK = 16384;   // with near-field reflection a forced near_vis refresh runs this many Gaussians a frame (~0.3 s on the M4)
 
 // D14 (6 axes + 8 diagonals) and the least-squares SH2 fit of values on them (loop_surf.py's pinv(sh2(D14))).
 // The vertical axes lean 1e-4 rad off the pole: vgrid_lookup's atan2(0, 0) is NaN on Metal.
@@ -501,7 +348,7 @@ export class Lighting {
     this.emitOneSided = this.assetEmitters?.oneSided ?? false;
     // no lamp: the asset ships only a disabled placeholder (asset.json lamps[0].enabled false, e.g. hill: the sun
     // lights it). The lamp passes are skipped and the emitter panel is one dark emitter, so the light cut has a root.
-    this.lampOff = !this.unified && !this.assetEmitters && asset.header.lamps?.[0]?.enabled === false;
+    this.lampOff = !this.unified && !this.assetEmitters;   // no emitters: no lamp (the analytic / generated panel lamp is gone, 2026-10-29)
     // Room for the per-box materials the renderer adds (see setBoxMaterial): the asset's, then one per box part.
     this.materialBytes = new ArrayBuffer(Math.max(MAX_MATERIALS, asset.header.buffers.materials.count + 3) * 32);
     new Uint8Array(this.materialBytes).set(new Uint8Array(r.materials));
@@ -559,8 +406,12 @@ export class Lighting {
     const lodQ = new URLSearchParams(globalThis.location?.search ?? '').get('lodlight');
     this.lodLight = lodN > 0 && (lodQ === '1' || lodQ === '2');
     this.lodCut = this.lodLight && lodQ === '2';
+    // sender LOD (bounce.wgsl sc_select): only the bounce senders some probe can resolve are lit; the rest of the tree
+    // is lit as the nodes every probe sees whole. Needs the nodes' V grids (main.js) and SH2 probes. On by default
+    // (David, 2026-10-29: hill_bin 505 -> 246 ms a frame on the M4, no visible change); ?sendercut=0 per-leaf senders
+    this.senderCut = lodN > 0 && !!asset.lodNodes.vgrid && new URLSearchParams(globalThis.location?.search ?? '').get('sendercut') !== '0';
     let vgridBytes = r.vgrid;
-    if (lodN) {
+    if (lodN && asset.lodNodes.vgrid) {   // nodes' own V grids: lit nodes only (?lodlight)
       const v = new Uint8Array(r.vgrid.byteLength + lodN * 128);
       v.set(new Uint8Array(r.vgrid)); v.set(new Uint8Array(asset.lodNodes.vgrid, 0, lodN * 128), r.vgrid.byteLength);
       vgridBytes = v.buffer;
@@ -570,10 +421,7 @@ export class Lighting {
       gaussians: gaussBuf, parts: partBuf,
       nodes: buf('nodes', r.nodes), kids: buf('kids', r.kids), vgrid: buf('vgrid', vgridBytes),
       lamps: buf('lamps', this.lampBytes), materials: buf('materials', this.materialBytes),
-      samples: buf('samples', this.count * 16),
       lamp_state: buf('lamp_state', (this.count + lodN) * 32),
-      // bit 0 shadow_cull's clear, bit 1 ema's walk-now for the amortized walk_emit (shadow_cull.wgsl, ema.wgsl)
-      node_status: buf('shadow node status', asset.header.buffers.nodes.count * 4),
       // second half: the specular layer toward the eye with reflection coverage on (emissive.wgsl shade_emit, U.iso bit 4)
       // + two vec4 per internal tree node with ?lod= (lod.wgsl lod_colour: a node's shown colour at 2 G + (n - G), its
       // mean bounce at 2 G + (N - G) + (n - G))
@@ -587,6 +435,32 @@ export class Lighting {
       this.lodList = device.createBuffer({ label: 'lod shade list', size: (16 + this.count + lodN) * 4,
         usage: B.STORAGE | B.INDIRECT | B.COPY_DST | B.COPY_SRC });
       this.lodNeed = buf('lod fill sources', this.count * 4);
+    }
+    if (this.senderCut) {
+      const N = this.count + lodN, nu = new Uint32Array(r.nodes);
+      this.scSlots = Math.min(lodN, 1 << 18);   // cut nodes lit per frame at most (sc_L); past it a node's children decide
+      this.scList = device.createBuffer({ label: 'sender cut lists', size: (16 + N) * 4, usage: B.STORAGE | B.INDIRECT | B.COPY_DST | B.COPY_SRC });
+      device.queue.writeBuffer(this.scList, 0, new Uint32Array([0, 0, 0, 0, 0, 0, 0, 0, this.scSlots, 0, 0, 0, 0, 0, 0, 0]));
+      this.scStale = true;
+      this.buffers.sc_flag = buf('sender cut flags', N * 4);
+      // per slot x 8: each face's SH2 transfer and exposure (0-5, sc_xfer) and the direct light it catches (6-7, sc_L
+      // in emissive.wgsl / environment.wgsl): one buffer, so node_cut stays within 10 storage buffers
+      this.buffers.sc_X = buf('sender cut faces', this.scSlots * 8 * 16);
+      // every node by depth (sc_select runs a depth at a time, parents before children)
+      const byDepth = [];
+      for (let n = 0; n < N; n++) (byDepth[nu[n * 24 + 21]] ??= []).push(n);
+      const order = new Uint32Array(N);
+      let off = 0;
+      this.scLevels = [];
+      byDepth.forEach((list, d) => {
+        if (!list?.length) return;
+        order.set(list, off);
+        const lv = device.createBuffer({ label: `sender cut depth ${d}`, size: 16, usage: B.UNIFORM | B.COPY_DST });
+        device.queue.writeBuffer(lv, 0, new Uint32Array([d, off, list.length, 0]));
+        this.scLevels.push({ count: list.length, lv });
+        off += list.length;
+      });
+      this.buffers.sc_nodes = buf('sender cut nodes by depth', order);
     }
     this.resetHistory();
     // the box Gaussians now point at their own materials, and unified marks emissive ones (above): re-upload the records
@@ -633,44 +507,21 @@ export class Lighting {
       this.blurMask = 0;
     }
 
-    const bindings = {
-      walk_lamp: ['uniform', 'gaussians', 'nodes', 'kids', 'vgrid', 'parts', 'lamps', 'samples'],
-      ema: ['uniform', 'gaussians', 'parts', 'lamps', 'samples', 'lamp_state', 'node_status'],
-      shade: ['uniform', 'gaussians', 'nodes', 'vgrid', 'parts', 'lamps', 'lamp_state', 'materials', 'colour'],
-    };
-    this.pipelines = {};
-    this.groups = {};
-    for (const [file, entry] of KERNELS) {
-      const module = device.createShaderModule({ label: entry, code: sources.common + '\n' + sources[file] });
-      const pipe = device.createComputePipeline({ label: entry, layout: 'auto', compute: { module, entryPoint: entry } });
-      this.pipelines[entry] = pipe;
-      this.groups[entry] = device.createBindGroup({
-        layout: pipe.getBindGroupLayout(0),
-        entries: bindings[entry].map((name, binding) => ({ binding, resource: { buffer: this.buffers[name] } })),
-      });
-    }
-    if (this.unified) {   // ema.wgsl ema_light: shadow history per light (unified lights), pooled over neighbours
-      this.buffers.pool = buf('shadow pool', this.poolNeighbours(asset, q.get('shadowpool') !== '0'));
-      bindings.ema_light = [...bindings.ema, 'pool'];
-      const module = device.createShaderModule({ label: 'ema_light', code: sources.common + '\n' + sources.ema });
-      const pipe = device.createComputePipeline({ label: 'ema_light', layout: 'auto', compute: { module, entryPoint: 'ema_light' } });
-      this.pipelines.ema_light = pipe;
-      this.groups.ema_light = device.createBindGroup({
-        layout: pipe.getBindGroupLayout(0),
-        entries: bindings.ema_light.map((name, binding) => ({ binding, resource: { buffer: this.buffers[name] } })),
-      });
-    }
     this.uniform = new ArrayBuffer(64);
-    this.iso = true;    // M39 direction-independent transfer by default (David, 2026-10-24); the View panel switches it off
-    this.shProbes = true;   // M39 stage 2: SH2 probes (only with iso)
+    // M39 direction-independent transfer with SH2 probes (stage 2) is the only lighting model since 2026-10-29 (David
+    // archived M36's view-dependent flake shading and the 128-cell probe bounce; their WGSL branches stay for the
+    // native tools). FrameUniforms.iso bits 0 and 1 are always set.
     this.transmit = false;  // M41 transmission (only with iso), off by default
-    this.specSplit = false; // reflection coverage / Fresnel (main.js): specular toward the eye in colour[G + g] and lo_b w lanes
-    this.sheen = false;     // Fresnel's probe sheen for matte materials (bounce_sh, lo_b w lanes)
+    this.specSplit = false; // reflection coverage / Fresnel (main.js): specular toward the eye in colour[G + g] and lo_b lanes
+    this.sheen = false;     // Fresnel's probe sheen for matte materials (bounce_sh, lo_b lanes)
     this.initIso(device, sources);
     this.initBounce(device, sources, asset);
-    this.initShadowCull(device, sources, asset);
+    this.initNodeParents(device, asset);
     this.initEmissive(device, sources);
-    this.initProgressive(device, sources, asset);
+    if (this.senderCut) this.initSenderCut(device);
+    // unified lights: an opacity map per light (lights_map.js), the only method since 2026-10-29 (David archived the
+    // per-receiver walk)
+    if (this.unified) this.lightsMap = new LightsMap(device, sources, this);
   }
 
   // M39: each leaf's iso_norm (exposed area from its V grid) into Node.pad0, once per asset (iso_init.wgsl), and the
@@ -688,7 +539,7 @@ export class Lighting {
     const group = device.createBindGroup({ layout: bgl, entries: ['uniform', 'gaussians', 'nodes', 'vgrid', 'materials']
       .map((name, binding) => ({ binding, resource: { buffer: this.buffers[name] } })) });
     this.isoInit = { pipe, group };
-    if (this.lodN) this.isoInit.nodes = device.createComputePipeline({ label: 'iso_init_nodes', layout, compute: { module, entryPoint: 'iso_init_nodes' } });
+    if (this.lodN && (this.lodLight || this.senderCut)) this.isoInit.nodes = device.createComputePipeline({ label: 'iso_init_nodes', layout, compute: { module, entryPoint: 'iso_init_nodes' } });
     this.runIsoInit();
   }
 
@@ -703,111 +554,17 @@ export class Lighting {
     this.device.queue.submit([encoder.finish()]);
   }
 
-  // M39 direction-independent transfer on or off; the bounce history restarts so the probes settle on the new rule.
-  setIso(on) {
-    this.iso = on;
-    this.firstGather = true;
-    this.round = 0;
-    this.forceNear = true;   // stage 2: iso_xfer refreshes every Gaussian's t'
-  }
-
-  // M39 stage 2: the matte bounce through SH2 probes (bounce_sh) instead of the 128-cell gather (bounce_dirs).
-  setShProbes(on) {
-    this.shProbes = on;
-    this.forceNear = true;
-  }
-
-  // Hierarchical shadow walk (shadow_cull.wgsl, off by default): the scene tree's nodes grouped by depth (part roots
-  // first, the scene root left out), and once per asset every node's rest-frame box and parent.
-  initShadowCull(device, sources, asset) {
-    const buf = (label, size, usage = B.STORAGE) => device.createBuffer({ label, size, usage: usage | B.COPY_DST | B.COPY_SRC });
-    const N = this.nodeCount, nu = new Uint32Array(asset.raw.nodes);
-    const byDepth = [];
-    for (let i = 0; i < N; i++) {
-      if (nu[i * 24 + 15] === 0xffffffff) continue;
-      (byDepth[nu[i * 24 + 21]] ??= []).push(i);
-    }
-    const order = new Uint32Array(N);
-    this.hsLevels = [];
-    let off = 0;
-    for (let d = 1; d < byDepth.length; d++) {
-      const list = byDepth[d] ?? [];
-      if (!list.length) continue;
-      order.set(list, off);
-      const level = buf(`shadow level ${d}`, 16, B.UNIFORM);
-      device.queue.writeBuffer(level, 0, new Uint32Array([off, list.length, d, 0]));
-      this.hsLevels.push({ count: list.length, level });
-      off += list.length;
-    }
-    Object.assign(this.buffers, {
-      node_box: buf('node rest boxes', N * 32),
-      node_parent: buf('node parents', N * 4), level_nodes: buf('nodes by depth', N * 4),
-      hs_params: buf('shadow cull params', 32, B.UNIFORM),
-    });
-    // every node's parent (part roots and the scene root: none), filled here so readers other than shadow_cull
-    // (light_shadow.wgsl lsm_splat's motion-blur cut) need not wait for its first pass
-    const parent = new Uint32Array(N).fill(0xffffffff), kidsU = new Uint32Array(asset.raw.kids);
+  // every node's parent (part roots and the scene root: none), for the passes that walk up the tree: the opacity
+  // maps' motion-blur cut (light_shadow.wgsl lsm_splat, sun_map.wgsl, lights_map.wgsl) and the sender cut
+  initNodeParents(device, asset) {
+    const N = this.nodeCount, nu = new Uint32Array(asset.raw.nodes), kids = new Uint32Array(asset.raw.kids);
+    const parent = new Uint32Array(N).fill(0xffffffff);
     for (let i = this.count; i < N; i++) {
       if (nu[i * 24 + 15] === 0xffffffff) continue;
-      for (let j = nu[i * 24 + 19]; j < nu[i * 24 + 20]; j++) parent[kidsU[j]] = i;
+      for (let j = nu[i * 24 + 19]; j < nu[i * 24 + 20]; j++) parent[kids[j]] = i;
     }
+    this.buffers.node_parent = device.createBuffer({ label: 'node parents', size: N * 4, usage: B.STORAGE | B.COPY_DST | B.COPY_SRC });
     device.queue.writeBuffer(this.buffers.node_parent, 0, parent);
-    device.queue.writeBuffer(this.buffers.level_nodes, 0, order);
-    this.hierShadow = true;  // on by default (David, 2026-10-25)
-    this.hierStride = 1;     // amortized walk_emit: still Gaussians walk once every hierStride frames (1 = every frame; opt-in)
-    this.hsDirty = true;     // shadow_cull reruns when the light or a part moved (encode's `changed`)
-    const res = {
-      0: this.buffers.uniform, 1: this.buffers.gaussians, 2: this.buffers.nodes, 4: this.buffers.parts, 9: this.buffers.kids,
-      33: this.buffers.node_status, 34: this.buffers.node_box, 35: this.buffers.node_parent, 36: this.buffers.level_nodes,
-      37: this.buffers.hs_params,
-    };
-    const module = device.createShaderModule({ label: 'shadow_cull', code: sources.common + '\n' + sources.shadow_cull });
-    this.hs = {};
-    for (const [entry, binds] of Object.entries(SHADOW_CULL)) {
-      const pipe = device.createComputePipeline({ label: entry, layout: 'auto', compute: { module, entryPoint: entry } });
-      const group = level => device.createBindGroup({
-        layout: pipe.getBindGroupLayout(0),
-        entries: binds.map(b => ({ binding: b, resource: { buffer: b === 38 ? level : res[b] } })),
-      });
-      this.hs[entry] = { pipe, groups: binds.includes(38) ? this.hsLevels.map(l => group(l.level)) : [group(null)] };
-    }
-    const u = new Uint32Array(16); u[1] = this.count;
-    device.queue.writeBuffer(this.buffers.uniform, 0, u);
-    const encoder = device.createCommandEncoder();
-    const run = (entry, threads, k = 0) => {
-      const pass = encoder.beginComputePass({ label: entry });
-      pass.setPipeline(this.hs[entry].pipe); pass.setBindGroup(0, this.hs[entry].groups[k]);
-      pass.dispatchWorkgroups(Math.max(1, Math.ceil(threads / WG))); pass.end();
-    };
-    run('hs_box_leaf', this.count);
-    for (let k = this.hsLevels.length - 1; k >= 0; k--) run('hs_box_up', this.hsLevels[k].count, k);
-    device.queue.submit([encoder.finish()]);
-  }
-
-  // The world box every emitter_sample point can land in (shadow_cull.wgsl HP): each emitter leaf's mean +- radius / 3
-  // per axis (the jitter cube), or +- sqrt(3) radius with the emitter-shaped jitter (a clamped 3-sigma draw).
-  shadowLightBox(nodes, skipPart) {
-    const f = new Float32Array(nodes.buffer, nodes.byteOffset, nodes.length), u = new Uint32Array(nodes.buffer, nodes.byteOffset, nodes.length);
-    const s = this.emitSmooth & 2 ? Math.sqrt(3) : 1 / 3;
-    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
-    for (let o = 0; o < f.length; o += 16) {
-      if (u[o + 11] !== 0xffffffff) continue;
-      for (let k = 0; k < 3; k++) {
-        lo[k] = Math.min(lo[k], f[o + k] - s * f[o + 3]);
-        hi[k] = Math.max(hi[k], f[o + k] + s * f[o + 3]);
-      }
-    }
-    const hp = new ArrayBuffer(32), hf = new Float32Array(hp), hu = new Uint32Array(hp);
-    hf.set(lo, 0); hu[3] = skipPart; hf.set(hi, 4); hu[7] = HS_BUDGET;
-    this.device.queue.writeBuffer(this.buffers.hs_params, 0, hp);
-  }
-
-  // Hierarchical shadow walk on or off, and the amortized walk's stride (the walk on by default, the stride opt-in; main.js syncs them).
-  setHierShadow(on, stride = this.hierStride) {
-    this.hierShadow = on;
-    this.hierStride = Math.max(1, stride | 0);
-    this.hsDirty = true;
-    this.emitKey = null;   // setEmitters rewrites EmitParams.hier / stride
   }
 
   initEmissive(device, sources) {
@@ -815,29 +572,30 @@ export class Lighting {
     this.buffers.emitters = buf('emitters', MAX_EMITTERS * 64);
     this.buffers.emit_nodes = buf('emitter tree', (2 * MAX_EMITTERS - 1) * 96);   // EmitNode + its ASG covariance (packEmitNodes)
     this.buffers.emit_params = buf('emit params', 64, B.UNIFORM);
-    this.emitterTarget = EMITTERS_TARGET;
     this.emitTheta = EMIT_THETA;
     this.emitMode = 1;
     this.emitterCount = 0;
     this.emitEdgeSoft = 0.2;   // one-sided emitters fade over |cos| < this around their plane (0 = hard cut)
-    this.emitSmooth = 0;    // N5 shadow-sampling opt-ins: 1 golden pick, 2 emitter-shaped jitter, 4 progressive 4 samples + ease
     this.asgSpec = 1;       // P3 ASG specular (EmitParams.n5 bits 3-4), on by default (David, 2026-10-25): 1 lights as shapes in shiny highlights, 3 with the spec cut
-    this.historyMode = 0;   // 0 EMA with the 1/16 floor (M35), 1 effective count (N5)
     const res = {
       0: this.buffers.uniform, 1: this.buffers.gaussians, 2: this.buffers.nodes, 3: this.buffers.vgrid,
       4: this.buffers.parts, 6: this.buffers.lamp_state, 7: this.buffers.materials, 8: this.buffers.colour,
       9: this.buffers.kids, 13: this.buffers.lo_dir, 18: this.buffers.emit_nodes, 19: this.buffers.emit_params,
-      20: this.buffers.samples, 33: this.buffers.node_status, 61: this.lodFlagBuf, 62: this.lodList,
+      61: this.lodFlagBuf, 62: this.lodList,
+      81: this.scList, 83: this.buffers.sc_X,
     };
     const module = device.createShaderModule({ label: 'emissive', code: sources.common + '\n' + sources.material_ext + '\n' + sources.emissive });
     this.emitModule = module;
     this.emitSources = sources;
     this.emitRes = res;
     this.emit = {};
-    const kinds = this.lodCut ? { ...EMISSIVE, shade_emit_list: [[0, 1, 2, 3, 4, 6, 7, 8, 18, 19, 62], 'shade'],
+    let kinds = this.lodCut ? { ...EMISSIVE, shade_emit_list: [[0, 1, 2, 3, 4, 6, 7, 8, 18, 19, 62], 'shade'],
       shade_emit_nodes_list: [[0, 1, 2, 3, 4, 6, 7, 8, 18, 19, 61, 62], 'shade'],
       shade_emit_nodes: [[0, 1, 2, 3, 4, 6, 7, 8, 18, 19, 61], 'shade'] }   // lodCut = false at run time: stage 1
       : this.lodLight ? { ...EMISSIVE, shade_emit_nodes: [[0, 1, 2, 3, 4, 6, 7, 8, 18, 19, 61], 'shade'] } : EMISSIVE;
+    if (this.senderCut) Object.assign(kinds === EMISSIVE ? (kinds = { ...EMISSIVE }) : kinds, {
+      direct_dirs_emit_sc: [[0, 1, 2, 3, 4, 6, 7, 13, 18, 19, 81], 'direct_dirs'],
+      direct_dirs_nodes_sc: [[0, 1, 2, 3, 4, 6, 7, 18, 19, 81, 83], 'sc'] });
     for (const [entry, [binds, timer]] of Object.entries(kinds)) {
       const pipe = device.createComputePipeline({ label: entry, layout: 'auto', compute: { module, entryPoint: entry } });
       this.emit[entry] = { pipe, timer, groups: [device.createBindGroup({
@@ -848,227 +606,16 @@ export class Lighting {
     }
   }
 
-  // Projection-field shadows (prototype, ?lights=unified&shadow=pf): the asset's pfield.bin (M38 fields per part,
-  // experiments/M42_many_lights/pf_export.py) in one storage buffer; walk_emit_pf (emissive.wgsl) then replaces
-  // walk_emit, looking up the parts that have a field and walking the rest.
-  // Returns null once the field is bound, or a warning when there is no usable field (missing, unreadable, or baked
-  // from another version of the asset: pfield.json's fingerprint vs asset.fingerprint); the caller then keeps the
-  // sampled path (walk_emit), which needs nothing from here.
-  async loadField(url, direct = false, asset = null, name = '') {
-    const fix = `run experiments/M42_many_lights/pf_export.py ${name}; using sampled shadows`;
-    let bytes, meta;
-    try {
-      const [rb, rj] = await Promise.all([fetch(url), fetch(url.replace(/\.bin$/, '.json'))]);
-      if (!rb.ok) return `no shadow fields for ${name}; ${fix}`;
-      bytes = await rb.arrayBuffer();
-      meta = rj.ok ? await rj.json() : null;
-    } catch (e) {
-      return `no shadow fields for ${name} (${e.message}); ${fix}`;
-    }
-    if (bytes.byteLength < 32 || new Uint32Array(bytes, 0, 1)[0] !== 0x444C4650) return `${url} is not a pfield file; ${fix}`;
-    if (asset && !sameFingerprint(meta?.asset, asset.fingerprint)) return `shadow fields are stale for ${name}; re-${fix}`;
-    const fq = new URLSearchParams(globalThis.location?.search ?? '');
-    if (fq.get('pftab') === '0') new Uint32Array(bytes)[5] = 0;   // DEBUG: scan every axis instead of the axis table
-    const B = GPUBufferUsage, device = this.device;
-    // two regions after the file (header words 6 and 7, pfd only): each part's world-space bound (centre, radius;
-    // radius -1 = no field), rewritten each frame from the parts' transforms (writePfBounds), and the per-Gaussian T
-    // cache shade_emit_pfd shares with direct_dirs_emit_pfd (4 words each)
-    const u = new Uint32Array(bytes), f = new Float32Array(bytes);
-    const K = u[2], NP = u[3], words = u.length;
-    this.pfDir = [];
-    for (let p = 0; p < NP; p++) {
-      const d = 8 + 12 * K + 8 * p;
-      this.pfDir.push(u[d + 4] ? [f[d], f[d + 1], f[d + 2], f[d + 3]] : null);
-    }
-    if (direct) { u[6] = words; u[7] = words + 4 * NP; }
-    this.pfBoundsWord = u[6];
-    const size = (words + (direct ? 4 * NP + 4 * this.count : 0)) * 4;
-    this.buffers.pfield = device.createBuffer({ label: 'projection fields', size, usage: B.STORAGE | B.COPY_DST });
-    device.queue.writeBuffer(this.buffers.pfield, 0, bytes);
-    const res = { ...this.emitRes, 50: this.buffers.pfield };
-    const pipe = device.createComputePipeline({ label: 'walk_emit_pf', layout: 'auto', compute: { module: this.emitModule, entryPoint: 'walk_emit_pf' } });
-    this.emit.walk_emit_pf = { pipe, timer: 'walk_lamp', groups: [device.createBindGroup({
-      layout: pipe.getBindGroupLayout(0),
-      entries: [0, 1, 2, 4, 9, 18, 19, 20, 33, 50].map(b => ({ binding: b, resource: { buffer: res[b] } })),
-    })] };
-    this.pfield = true;
-    if (!direct) return null;
-    // option B (?shadow=pfd): shade_emitters' per-node T from the fields (emissive.wgsl pfd_T), no walk or history.
-    // The variant module replaces the two lamp_state readers in shade_emitters, so its entry points bind the field
-    // (50) in place of lamp_state (6) and stay within 8 storage buffers; the default module is untouched.
-    const code = pfdSource(this.emitSources, fq.get('pfsplit') !== '0');   // DEBUG ?pfsplit=0: no strongest-lights split
-    const mod = device.createShaderModule({ label: 'emissive pfd', code });
-    for (const [entry, [binds, timer]] of Object.entries({ shade_emit: EMISSIVE.shade_emit, direct_dirs_emit: EMISSIVE.direct_dirs_emit })) {
-      const p = device.createComputePipeline({ label: entry + '_pfd', layout: 'auto', compute: { module: mod, entryPoint: entry } });
-      this.emit[entry + '_pfd'] = { pipe: p, timer, groups: [device.createBindGroup({
-        layout: p.getBindGroupLayout(0),
-        entries: binds.map(b => (b === 6 ? 50 : b)).map(b => ({ binding: b, resource: { buffer: res[b] } })),
-      })] };
-    }
-    this.pfd = true;
-    return null;
-  }
-
-  // ?shadow=pfd: each field part's bound in world space for pfd_T's cull (the field's rest-frame centre through the part's
-  // current transform, partXf rows [R | t]; rigid, so the radius carries over)
-  writePfBounds() {
-    if (!this.pfBoundsWord || !this.partXf) return;
-    const out = new Float32Array(this.pfDir.length * 4);
-    this.pfDir.forEach((b, p) => {
-      if (!b) { out[p * 4 + 3] = -1; return; }
-      const m = this.partXf.subarray(p * 32, p * 32 + 12);
-      for (let r = 0; r < 3; r++) out[p * 4 + r] = m[r * 4] * b[0] + m[r * 4 + 1] * b[1] + m[r * 4 + 2] * b[2] + m[r * 4 + 3];
-      out[p * 4 + 3] = b[3];
-    });
-    this.device.queue.writeBuffer(this.buffers.pfield, this.pfBoundsWord * 4, out);
-  }
-
-  // Occluder-proxy shadows (prototype, ?lights=unified&shadow=rcd or pxd; experiments/M42_many_lights/proxy_stage1.py):
-  // the pfd path (selection, T cache, part cull) with the field lookup swapped for emissive.wgsl rcd_tau or pxd_tau.
-  // Both bind a host-built buffer at 50 in place of the field: header (word 1 data offset, 3 part count, 4 rmin, 6
-  // world bounds, 7 T cache), then for rcd a copy of kids.bin (the entry points already hold 8 storage buffers, so
-  // the walk can't bind kids itself), for pxd the asset's proxy.bin (proxy_export.py; fingerprint-checked as pfield).
-  // Occluders as pfd's fields: parts with non-emissive Gaussians except the room shell (?rcdshell=1 walks it too);
-  // for pxd, the parts proxy.bin lists. Bounds are parts.bin's rest-frame bound. Returns a warning or null.
-  // rcc / pxc: the same per receiver cluster (emissive.wgsl cluster_T): each part's Gaussians on a ?rcl= grid (default
-  // 0.03 m) in its rest frame, the cluster block appended to the buffer (word 5).
-  async loadProxyShadow(mode, asset, name = '') {
-    const q = new URLSearchParams(globalThis.location?.search ?? '');
-    const NP = asset.partCount, B = GPUBufferUsage, device = this.device;
-    let head;
-    const tau = { rcc: 'rcd', pxc: 'pxd' }[mode] ?? mode, clustered = tau !== mode;
-    if (tau === 'pxd') {
-      const fix = `run experiments/M42_many_lights/proxy_export.py ${name}; using sampled shadows`;
-      let bytes, meta;
-      try {
-        const base = `runtime/assets/${name}/proxy`;
-        const [rb, rj] = await Promise.all([fetch(base + '.bin'), fetch(base + '.json')]);
-        if (!rb.ok) return `no shadow proxies for ${name}; ${fix}`;
-        bytes = await rb.arrayBuffer();
-        meta = rj.ok ? await rj.json() : null;
-      } catch (e) {
-        return `no shadow proxies for ${name} (${e.message}); ${fix}`;
-      }
-      if (bytes.byteLength < 32 || new Uint32Array(bytes, 0, 1)[0] !== 0x59585250) return `proxy.bin is not a proxy file; ${fix}`;
-      if (!sameFingerprint(meta?.asset, asset.fingerprint)) return `shadow proxies are stale for ${name}; re-${fix}`;
-      head = new Uint32Array(bytes);
-    } else {
-      const kids = new Uint32Array(asset.raw.kids);
-      head = new Uint32Array(8 + kids.length);
-      head[0] = 0x44435252; head[1] = 8; head.set(kids, 8);
-      new Float32Array(head.buffer)[4] = Number(q.get('rmin') ?? 0.04);
-    }
-    head[3] = NP;
-    const pv = new DataView(asset.parts), gu = new Uint32Array(asset.gaussians);
-    const shell = q.get('rcdshell') !== '1' ? /^(floor|ceiling|back|left_red|right_green)$/ : /^$/;
-    this.pfDir = asset.header.parts.map((pt, p) => {
-      let occ;
-      if (tau === 'pxd') occ = head[9 + 2 * p] > 0;
-      else {
-        const [g0, g1] = pt.gaussians;
-        occ = !shell.test(pt.name);
-        if (occ) { occ = false; for (let g = g0; g < g1 && !occ; g++) occ = !(gu[g * 16 + 15] & 0x10000); }
-      }
-      return occ ? [0, 1, 2, 3].map(k => pv.getFloat32(p * 128 + 96 + 4 * k, true)) : null;
-    });
-    const words = head.length;
-    let clu = null;
-    if (clustered) {
-      // clusters: per part, its Gaussians binned on a rcl grid in the rest frame; centre = the members' mean
-      const gf = new Float32Array(asset.gaussians), rcl = Number(q.get('rcl') ?? 0.03);
-      const gcl = new Uint32Array(this.count), list = [], cells = new Map();
-      asset.header.parts.forEach((pt, p) => {
-        const [g0, g1] = pt.gaussians;
-        for (let g = g0; g < g1; g++) {
-          const key = `${p},${Math.floor(gf[g * 16] / rcl)},${Math.floor(gf[g * 16 + 1] / rcl)},${Math.floor(gf[g * 16 + 2] / rcl)}`;
-          let c = cells.get(key);
-          if (c === undefined) { c = list.length; cells.set(key, c); list.push([0, 0, 0, 0, p]); }
-          const e = list[c];
-          e[0] += gf[g * 16]; e[1] += gf[g * 16 + 1]; e[2] += gf[g * 16 + 2]; e[3]++;
-          gcl[g] = c;
-        }
-      });
-      const lw = new Uint32Array(4 * list.length), lf = new Float32Array(lw.buffer);
-      list.forEach((e, c) => { lf[4 * c] = e[0] / e[3]; lf[4 * c + 1] = e[1] / e[3]; lf[4 * c + 2] = e[2] / e[3]; lw[4 * c + 3] = e[4]; });
-      clu = { n: list.length, gcl, list: lw };
-      this.clusterCount = clu.n;
-    }
-    const cw = clu ? 4 + this.count + 4 * clu.n + 24 * clu.n : 0;
-    const u = new Uint32Array(words + 4 * NP + 4 * this.count + cw);
-    u.set(head);
-    u[6] = words; u[7] = words + 4 * NP;
-    if (clu) {
-      const C = words + 4 * NP + 4 * this.count;
-      u[5] = C; u[C] = clu.n; u[C + 1] = C + 4; u[C + 2] = C + 4 + this.count; u[C + 3] = C + 4 + this.count + 4 * clu.n;
-      u.set(clu.gcl, C + 4); u.set(clu.list, C + 4 + this.count);
-    }
-    this.pfBoundsWord = u[6];
-    this.buffers.pfield = device.createBuffer({ label: `shadow ${mode}`, size: u.byteLength, usage: B.STORAGE | B.COPY_DST });
-    device.queue.writeBuffer(this.buffers.pfield, 0, u);
-    const res = { ...this.emitRes, 50: this.buffers.pfield };
-    const mod = device.createShaderModule({ label: `emissive ${mode}`, code: pfdSource(this.emitSources, q.get('pfsplit') !== '0', mode) });
-    for (const [entry, [binds, timer]] of Object.entries({ shade_emit: EMISSIVE.shade_emit, direct_dirs_emit: EMISSIVE.direct_dirs_emit })) {
-      const p = device.createComputePipeline({ label: `${entry}_${mode}`, layout: 'auto', compute: { module: mod, entryPoint: entry } });
-      this.emit[entry + '_pfd'] = { pipe: p, timer, groups: [device.createBindGroup({
-        layout: p.getBindGroupLayout(0),
-        entries: binds.map(b => (b === 6 ? 50 : b)).map(b => ({ binding: b, resource: { buffer: res[b] } })),
-      })] };
-    }
-    if (clustered) {
-      const p = device.createComputePipeline({ label: `cluster_T_${mode}`, layout: 'auto', compute: { module: mod, entryPoint: 'cluster_T' } });
-      this.emit.cluster_T = { pipe: p, timer: 'walk_lamp', groups: [device.createBindGroup({   // reports in walk_lamp's slot
-        layout: p.getBindGroupLayout(0),
-        entries: [0, 1, 2, 4, 18, 19, 50].map(b => ({ binding: b, resource: { buffer: res[b] } })),
-      })] };
-      this.cluster = true;
-    }
-    this.pfd = true;
-    return null;
-  }
-
-  // The lamp as a panel of emissive Gaussians: the asset lamp's rectangle (scaled by `size`, centred on `center`) tiled
-  // with about `emitterTarget` flat Gaussians (short axis along the lamp normal, optical depth 3 through the panel),
-  // each showing the lamp's radiance, plus the emitter tree the light cut walks. Returns the count.
-  setEmitters(center, size) {
-    const key = [...center, size, this.emitterTarget, this.emitTheta, this.emitMode, this.emitOneSided, this.emitEdgeSoft, this.emitSmooth, this.asgSpec].join();
+  // The light: an asset's own emissive Gaussians (setAssetEmitters), or with ?lights=unified every emissive part
+  // (setUnifiedEmitters). An asset without emitters has no lamp (one dark emitter, nothing lit directly): the panel
+  // lamp generated from lamps.bin's rectangle, and its analytic twin, are gone (David, 2026-10-29). Returns the count.
+  setEmitters(center) {
+    const key = [...center, this.emitTheta, this.emitMode, this.emitOneSided, this.emitEdgeSoft, this.asgSpec].join();
     if (this.unified) return this.setUnifiedEmitters();
     if (key === this.emitKey) return this.emitterDrawn;
     this.emitKey = key;
     if (this.assetEmitters) return this.setAssetEmitters(center);
-    const lf = new Float32Array(this.baseLamps);
-    const e1 = [...lf.subarray(4, 7)].map(v => v * size), e2 = [...lf.subarray(8, 11)].map(v => v * size);
-    const nrm = [...lf.subarray(12, 15)], Le = [...lf.subarray(16, 19)];
-    const a = 2 * Math.hypot(...e1), b = 2 * Math.hypot(...e2);
-    // a disabled or degenerate lamp (hill's placeholder sphere: zero half-axes, so the panel had NaN emitters and the
-    // tree build recursed until the stack overflowed): one dark emitter at the lamp, nothing drawn
-    if (this.lampOff || !(a * b > 0)) return this.setDarkEmitter(center);
-    const sp = Math.sqrt(a * b / this.emitterTarget);
-    const nu = Math.max(1, Math.round(a / sp)), nv = Math.max(1, Math.round(b / sp));
-    const n = Math.min(nu * nv, MAX_EMITTERS);
-    const u1 = e1.map(v => v / Math.hypot(...e1)), u2 = e2.map(v => v / Math.hypot(...e2));
-    const q = quatFromColumns(nrm, u1, u2);
-    const sx = 0.2 * sp, sy = 0.6 * a / nu, sz = 0.6 * b / nv;
-    const out = new Float32Array(n * 16);
-    for (let k = 0; k < n; k++) {
-      const i = k % nu, j = Math.floor(k / nu);
-      const fa = (i + 0.5) / nu * 2 - 1, fb = (j + 0.5) / nv * 2 - 1;
-      const o = k * 16;
-      for (let c = 0; c < 3; c++) out[o + c] = center[c] + fa * e1[c] + fb * e2[c];
-      out[o + 3] = 3 / (Math.sqrt(2 * Math.PI) * sx);
-      out.set(q, o + 4);
-      out.set([sx, sy, sz], o + 8);
-      out.set(Le, o + 12);
-    }
-    this.device.queue.writeBuffer(this.buffers.emitters, 0, out);
-    const { nodes, root, cov } = buildEmitterTree(out, n);
-    this.emitTree = { nodes, root, cov };   // light_shadow.js reads the root as its light
-    this.device.queue.writeBuffer(this.buffers.emit_nodes, 0, packEmitNodes(nodes, cov));
-    this.shadowLightBox(nodes, 0xffffffff);
-    // Overlap correction: panel area / sum of the emitters' footprints along the normal (2 pi sy sz Ein(3)).
-    const scale = (a * b) / (n * 2 * Math.PI * sy * sz * EIN3);
-    this.writeEmitParams(n, root, scale, nodes.length / 16, 0xffffffff, this.emitOneSided ? 1 : 0, nrm);
-    this.emitterDrawn = n;
-    return n;
+    return this.setDarkEmitter(center);
   }
 
   // Unified lights: the whole scene's light tree (lights.js) from the parts' current transforms (main.js sets partXf)
@@ -1077,9 +624,9 @@ export class Lighting {
   setUnifiedEmitters() {
     if (!this.partXf) return 0;
     const tree = this.lightSet.update(this.partXf, new Uint32Array(this.materialBytes, 0, this.materialCount * 8));
-    const params = [this.emitTheta, this.emitMode, this.emitEdgeSoft, this.emitSmooth, this.asgSpec, this.hierShadow, this.hierStride].join();
+    const params = [this.emitTheta, this.emitMode, this.emitEdgeSoft, this.asgSpec].join();
     if (!tree && this.lightSet.key === this.unifiedKey) {
-      // lights unchanged; EmitParams still follow the panel (setHierShadow clears emitKey)
+      // lights unchanged; EmitParams still follow the panel
       if (params !== this.unifiedParams || this.emitKey === null) {
         this.unifiedParams = params;
         this.writeUnifiedParams();
@@ -1096,14 +643,6 @@ export class Lighting {
       packed = { nodes: f, count: 1, root: 0, leaves: [] };
     }
     this.device.queue.writeBuffer(this.buffers.emit_nodes, 0, packed.nodes);
-    // the hierarchical shadow walk's light box: every leaf's jitter box, as shadowLightBox
-    const s = this.emitSmooth & 2 ? Math.sqrt(3) : 1 / 3;
-    const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
-    for (const nd of packed.leaves) for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], nd.mu[k] - s * nd.radius); hi[k] = Math.max(hi[k], nd.mu[k] + s * nd.radius); }
-    if (!packed.leaves.length) { lo.fill(0); hi.fill(0); }
-    const hp = new ArrayBuffer(32), hf = new Float32Array(hp), hu = new Uint32Array(hp);
-    hf.set(lo, 0); hu[3] = 0xffffffff; hf.set(hi, 4); hu[7] = HS_BUDGET;
-    this.device.queue.writeBuffer(this.buffers.hs_params, 0, hp);
     this.unifiedPacked = { root: packed.root, count: packed.count, leaves: packed.leaves.length };
     this.writeUnifiedParams();
     return 0;
@@ -1120,17 +659,12 @@ export class Lighting {
     const epu = new Uint32Array(ep), epf = new Float32Array(ep);
     epu[0] = n; epu[1] = root; epf[2] = scale; epf[3] = this.emitTheta; epu[4] = this.emitMode; epu[5] = nodeCount;
     epu[6] = skipPart; epu[7] = oneSided;
-    epf.set(normal, 8); epu[11] = this.emitSmooth | (this.asgSpec << 3);   // N5 opt-ins + ASG bits (emissive.wgsl EmitParams.n5)
-    epf[12] = this.emitEdgeSoft;
-    epu[13] = (this.hierShadow ? 1 : 0) | (this.hierStride > 1 ? 2 : 0); epu[14] = this.hierStride;   // EmitParams.hier, stride
+    epf.set(normal, 8); epu[11] = this.asgSpec << 3;   // ASG bits (emissive.wgsl EmitParams.n5; bits 0-2 were the walk's)
+    epf[12] = this.emitEdgeSoft;   // EmitParams.hier / stride (13, 14): the archived walk's, 0
     // EmitParams.lights; bits 1-2 are a DEBUG switch, ?lightdbg=<bits> (emissive.wgsl shade_emitters), bit 3 self-shadow
     // (?selfshadow=1: a light's own part occludes it, emissive.wgsl walk_tau_light), unified only
     const eq = new URLSearchParams(globalThis.location?.search ?? '');
     epu[15] = this.unified ? 1 | (Number(eq.get('lightdbg') ?? 0) & 6) | (eq.get('selfshadow') === '1' ? 8 : 0) : 0;
-    // ?shadow=pfd strongest-lights split (emissive.wgsl pfd_select): bits 8-11 K (?pfk=, 1-8), bits 16-23 share (?pfshare=)
-    // (default off: no ?pfshare=, share bits 0 = every node gets a lookup)
-    if (this.pfd) epu[15] |= (Math.min(Math.max(Number(eq.get('pfk') ?? 8), 1), 8) << 8) | (eq.has('pfshare') ? Math.round(Math.min(Math.max(Number(eq.get('pfshare')), 0.01), 1) * 255) << 16 : 0);
-    this.hsDirty = true;   // the light moved or changed
     this.device.queue.writeBuffer(this.buffers.emit_params, 0, ep);
     this.emitterScale = scale;
     this.emitterCount = n;
@@ -1145,8 +679,8 @@ export class Lighting {
     const { nodes, root, cov } = buildEmitterTree(out, 1);
     this.emitTree = { nodes, root, cov };
     this.device.queue.writeBuffer(this.buffers.emit_nodes, 0, packEmitNodes(nodes, cov));
-    this.shadowLightBox(nodes, 0xffffffff);
-    this.writeEmitParams(1, root, 0, nodes.length / 16, 0xffffffff, 0, [0, 0, 1]);
+    // count 0: the shaders skip the walk over this dark leaf (emissive.wgsl shade_leaf, ~13 ms a frame on hill)
+    this.writeEmitParams(0, root, 0, nodes.length / 16, 0xffffffff, 0, [0, 0, 1]);
     this.emitterDrawn = 0;
     return 0;
   }
@@ -1167,7 +701,6 @@ export class Lighting {
     const { nodes, root, cov } = buildEmitterTree(rec, n);
     this.emitTree = { nodes, root, cov };
     this.device.queue.writeBuffer(this.buffers.emit_nodes, 0, packEmitNodes(nodes, cov));
-    this.shadowLightBox(nodes, part);
     // emitting normal: the first emitter's short axis R x (SPEC 2.6 one-sided convention)
     const [x, y, z, w] = rec.subarray(4, 8);
     const nrm = [1 - 2 * (y * y + z * z), 2 * (x * y + w * z), 2 * (x * z - w * y)];
@@ -1176,7 +709,7 @@ export class Lighting {
     const ax = [[2 * (x * y - w * z), 1 - 2 * (x * x + z * z), 2 * (y * z + w * x)], [2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y)]];
     const extent = ax.map(a => {
       const vals = Array.from({ length: n }, (_, i) => a[0] * rec[i * 16] + a[1] * rec[i * 16 + 1] + a[2] * rec[i * 16 + 2]);
-      const lo = Math.min(...vals), hi = Math.max(...vals);
+      const lo = vals.reduce((m, v) => Math.min(m, v), Infinity), hi = vals.reduce((m, v) => Math.max(m, v), -Infinity);
       const cols = new Set(vals.map(v => Math.round((v - lo) / (hi - lo + 1e-9) * 1000))).size;
       return (hi - lo) * cols / Math.max(cols - 1, 1);
     });
@@ -1189,6 +722,15 @@ export class Lighting {
 
   initBounce(device, sources, asset) {
     const h = asset.header, G = this.count, N = h.buffers.nodes.count;
+    // tree slots (bounce.wgsl tree_slot; 2026-10-30): with sender LOD a start of 1/16 of the nodes (at least 64k),
+    // grown when a cut needs more (the room's cut takes 40% of its nodes, hill_bin's 1.2%); without it one per node
+    this.slotCap = this.senderCut ? Math.min(N, Math.max(65536, Math.ceil(N / 16))) : N;
+    if (!this.senderCut) {   // identity slots (sc_flag = node << 2)
+      const id = new Uint32Array(N);
+      for (let n = 0; n < N; n++) id[n] = n << 2;
+      this.buffers.sc_flag = device.createBuffer({ label: 'tree slots (one per node)', size: N * 4, usage: B.STORAGE | B.COPY_DST });
+      device.queue.writeBuffer(this.buffers.sc_flag, 0, id);
+    }
     // the lattice (room or terrain layout, probeLayout), then 8 probes per part that move with it (bounce.wgsl
     // part_probe_frame; static parts' stay idle)
     const lay = probeLayout(asset);
@@ -1199,29 +741,29 @@ export class Lighting {
     Object.assign(this.buffers, {
       probe_params: buf('probe params', PROBE_PARAMS_BYTES, B.UNIFORM),
       probe_data: buf('probe data', NP * NCELL * 96),
-      nearvis: buf('near-field visibility', G * 128),
-      lo_dir: buf('direct toward D14', G * 14 * 16),
-      lo_b: buf('bounce toward D14 + eye', G * 15 * 16),
-      node_acc: buf('node emitter sums', N * 14 * 16),
-      node_sh: buf('node emitter SH2', N * 9 * 16),
+      // near-field visibility: a placeholder until near field is first switched on (setNearField; 142 MB on hill_bin,
+      // off by default; bounce.wgsl near_byte reads 1 meanwhile)
+      nearvis: buf('near-field visibility (placeholder)', 128),
+      // common.wgsl LOB: one direct value per Gaussian, and the bounce toward the eye / the probes plus the specular
+      // lanes (2026-10-30; were 14 + 15 vec4 per Gaussian, one per direction)
+      lo_dir: buf('direct toward the probes', G * 16),
+      lo_b: buf('bounce (eye, probes, lanes)', G * LOB * 16),
+      // per tree slot, plus the null slot (bounce.wgsl tree_slot): with sender LOD only the nodes the probes reach
+      // get a slot, re-handed when the cut is re-selected (growSlots when they don't fit); without it, slot = node
+      node_acc: buf('node emitter sums', (this.slotCap + 1) * 14 * 16),
+      node_sh: buf('node emitter SH2 (halves)', (this.slotCap + 1) * 14 * 4),
       probe_sh: buf('probe SH2 (M39 stage 2)', NP * 9 * 16),
       xfer: buf('Gaussian transfer SH2 (M39 stage 2)', G * 3 * 16),
-      blk: buf('near-field blockers', G * 128),
-      lo_b_prev: buf('last frame bounce (near-field reflection)', G * 15 * 16),
+      // near-field reflection's two buffers: placeholders until it is first switched on (setNearReflection; ~410 MB on
+      // hill_bin, unused by default; 2026-10-29). near_cones binds blk but writes it only with reflection on.
+      blk: buf('near-field blockers (placeholder)', 16),
+      lo_b_prev: buf('last frame bounce (placeholder)', 16),
     });
-    // near-field reflection blockers, 16 (node, weight) per Gaussian: 0-7 own part from the asset's blockers.bin
-    // (runtime/bake_blockers.py; none without it), 8-15 other parts, written by near_vis while reflection is on
-    this.blkBytes = new Uint32Array(G * 32).fill(0xffffffff);
-    for (let i = 1; i < G * 32; i += 2) this.blkBytes[i] = 0;
-    if (asset.raw.blockers) {
-      const own = new Uint32Array(asset.raw.blockers);
-      for (let g = 0; g < G; g++) this.blkBytes.set(own.subarray(g * 16, g * 16 + 16), g * 32);
-    }
-    device.queue.writeBuffer(this.buffers.blk, 0, this.blkBytes);
+    this.blockersRaw = asset.raw.blockers ?? null;
+    this.blkBytes = null;
     this.nearRefl = false;
     this.emitterBounceFix = false;
-    this.nearCones = 8;   // near-field cone count (6 or 8) instead of the near_vis walk; 0 = the walk (main.js default: 8)
-    this.nearNext = G;   // next Gaussian of a chunked forced near_vis refresh (G = none pending)
+    this.nearCones = 8;   // near-field cone count, 6 or 8 (main.js default: 8)
     this.nodeCount = N;
     this.probeCount = NP;
     this.maxDepth = h.walk?.max_depth ?? 6;
@@ -1256,7 +798,7 @@ export class Lighting {
     let off = PPK * this.partCount;                    // static volumes after the movable parts' PPK each
     for (const v of lay.vols ?? []) { u.set([off, ...v.dims], 1252 + 4 * v.part); off += v.dims[0] * v.dims[1] * v.dims[2]; }
     u[1380] = PPK * this.partCount;                    // vol_info.x
-    if (NODE_PROBES) { this.nodeProbePos = nodeProbes(asset); f.set(this.nodeProbePos, 1384); }   // nodep
+    u[1381] = new URLSearchParams(globalThis.location?.search ?? '').get('probemargin') === 'old' ? 1 : 0;   // vol_info.y: the block margin on every gather
     f.set([1, 0, 0.02, 0.95], 12);              // alpha, force_near, vfloor, enclosed fraction
     // ?partprobes=0 (diagnosis, room layouts only): no probes riding with the parts, every Gaussian on the lattice
     const noPartProbes = !lay.terrain && new URLSearchParams(globalThis.location?.search ?? '').get('partprobes') === '0';
@@ -1266,7 +808,7 @@ export class Lighting {
     pinvD14().flat().forEach((v, i) => { f[76 + i] = v; });
     this.round = 0;
     this.forceNear = true;
-    this.nearField = true;   // main.js turns it off on the first lit frame (own-part visibility is the base)
+    this.nearField = false;   // own-part visibility is the base (David, 2026-10-23); main.js syncs the panel's box
     this.firstGather = true;
 
     const module = device.createShaderModule({ label: 'bounce', code: sources.common + '\n' + sources.material_ext + '\n' + sources.bounce });
@@ -1277,7 +819,7 @@ export class Lighting {
       13: this.buffers.lo_dir, 14: this.buffers.lo_b, 15: this.buffers.node_acc, 16: this.buffers.node_sh,
       25: this.buffers.probe_sh, 26: this.buffers.xfer,
       8: this.buffers.colour, 27: this.buffers.blk, 28: this.buffers.lo_b_prev, 40: this.buffers.env,
-      29: this.buffers.up_nodes,
+      29: this.buffers.up_nodes, 80: this.buffers.sc_flag,
     };
     this.bounce = {};
     const bounceQ = new URLSearchParams(globalThis.location?.search ?? '');
@@ -1288,19 +830,86 @@ export class Lighting {
         entries: binds.map(b => ({ binding: b, resource: { buffer: b === 17 ? this.levels[level]
           : b === 2 && entry === 'probe_gather' && this.blur && bounceQ.get('blurprobes') === '1' ? this.buffers.nodes_blur : res[b] } })),   // motion blur: the probes see moving parts unstretched (David, 2026-10-29: stretched-with-mass-kept senders gave dark splotches); ?blurprobes=1 the old stretch
       });
-      this.bounce[entry] = { pipe, groups: entry === 'node_up' ? this.levels.map((_, d) => group(d)) : [group(0)] };
+      const k = this.bounce[entry] = { pipe };
+      k.build = () => { k.groups = entry === 'node_up' ? this.levels.map((_, d) => group(d)) : [group(0)]; };   // again after growSlots
+      k.build();
     }
-    this.bounce.near_cones.timer = 'near_vis';
+    this.bounce.near_cones.timer = 'near_vis';   // its slot in the timer list
+    this.bounceModule = module;
+    this.bounceRes = res;
+  }
+
+  // sender LOD (bounce.wgsl sc_select ...): its bounce-module passes; per-depth groups for sc_select / node_up_sc
+  initSenderCut(device) {
+    const res = this.bounceRes;
+    Object.assign(res, { 35: this.buffers.node_parent, 41: this.buffers.env_T,
+      81: this.scList, 82: this.buffers.sc_nodes, 84: this.scList, 85: this.buffers.sc_X });
+    const SC = {
+      sc_select: [[0, 2, 4, 10, 15, 17, 35, 80, 81, 82], 'sc'],
+      sc_args: [[81], 'sc'],
+      sc_shadow: [[0, 2, 6, 9, 41, 84], 'sc'],
+      node_leaf_list: [[1, 2, 3, 4, 10, 13, 14, 15, 80, 84], 'node_leaf'],
+      sc_xfer: [[0, 1, 2, 3, 4, 84, 85], 'sc'],
+      node_cut: [[0, 1, 2, 3, 4, 10, 11, 15, 25, 80, 84, 85], 'sc'],
+      node_up_sc: [[0, 2, 9, 10, 15, 17, 29, 80], 'sc'],
+      node_sh2_sc: [[10, 15, 16, 80], 'sc'],
+    };
+    for (const [entry, [binds, timer]] of Object.entries(SC)) {
+      const pipe = device.createComputePipeline({ label: entry, layout: 'auto', compute: { module: this.bounceModule, entryPoint: entry } });
+      const group = lv => device.createBindGroup({ layout: pipe.getBindGroupLayout(0),
+        entries: binds.map(b => ({ binding: b, resource: { buffer: b === 17 ? lv : res[b] } })) });
+      const k = this.bounce[entry] = { pipe, timer };
+      k.build = () => { k.groups = entry === 'sc_select' ? this.scLevels.map(l => group(l.lv)) : entry === 'node_up_sc' ? this.levels.map(l => group(l)) : [group(null)]; };
+      k.build();
+    }
+    this.slotRead = device.createBuffer({ label: 'tree slot counts (readback)', size: 8, usage: B.MAP_READ | B.COPY_DST });
+    this.slotReadBusy = false;
+  }
+
+  // a re-selected cut handed out more tree slots than node_acc / node_sh hold (sender LOD; bounce.wgsl sc_mark):
+  // bigger arrays, the passes rebound, and the cut selected again next frame. Until then the nodes past the end read
+  // zero (a frame or two of missing bounce).
+  growSlots(need) {
+    const N = this.nodeCount, cap = Math.min(N, Math.max(this.slotCap * 2, Math.ceil(need * 1.25)));
+    if (cap <= this.slotCap) return;
+    this.slotCap = cap;
+    const buf = (label, size) => this.device.createBuffer({ label, size, usage: B.STORAGE | B.COPY_DST | B.COPY_SRC });
+    this.buffers.node_acc.destroy(); this.buffers.node_sh.destroy();
+    this.buffers.node_acc = buf('node emitter sums', (cap + 1) * 14 * 16);
+    this.buffers.node_sh = buf('node emitter SH2 (halves)', (cap + 1) * 14 * 4);
+    Object.assign(this.bounceRes, { 15: this.buffers.node_acc, 16: this.buffers.node_sh });
+    for (const k of Object.values(this.bounce)) k.build?.();
+    this.scStale = true;
+    this.requestFrame?.();   // main.js: the render-on-demand loop may be idle by the time the readback lands
+  }
+
+  // after a re-selection: read back how many tree slots the cut wanted (sc_list words 10, 11), one read at a time
+  checkSlots(encoder) {
+    if (this.slotReadBusy) return;
+    this.slotReadBusy = true;
+    encoder.copyBufferToBuffer(this.scList, 40, this.slotRead, 0, 8);
+    setTimeout(() => this.device.queue.onSubmittedWorkDone().then(() => this.slotRead.mapAsync(GPUMapMode.READ)).then(() => {
+      const [used, over] = new Uint32Array(this.slotRead.getMappedRange().slice(0));
+      this.slotRead.unmap();
+      this.slotReadBusy = false;
+      if (over > 0) this.growSlots(used);
+    }).catch(() => { this.slotReadBusy = false; }), 0);
   }
 
   // Near-field visibility (bounce.wgsl near_vis) on or off. Off = other parts never block the bounce within near_r:
   // only each Gaussian's own-part V grid does (David's working assumption, 2026-10-23).
   setNearField(on) {
-    this.nearField = on;
-    if (on) this.forceNear = true;
-    else {
+    if (on && this.buffers.nearvis.size < this.count * 128) {   // first use: the real buffer, all clear
+      this.buffers.nearvis = this.device.createBuffer({ label: 'near-field visibility', size: this.count * 128, usage: B.STORAGE | B.COPY_DST | B.COPY_SRC });
       this.device.queue.writeBuffer(this.buffers.nearvis, 0, new Uint8Array(this.count * 128).fill(255));
-      this.device.queue.writeBuffer(this.buffers.blk, 0, this.blkBytes);   // drop the other-part blockers
+      this.bounceRes[12] = this.buffers.nearvis;
+      for (const k of Object.values(this.bounce)) k.build?.();
+    }
+    this.nearField = on;
+    this.forceNear = true;   // both ways: iso_xfer's transfer holds the near-field visibility it was built with (2026-10-31)
+    if (!on) {
+      if (this.buffers.nearvis.size >= this.count * 128) this.device.queue.writeBuffer(this.buffers.nearvis, 0, new Uint8Array(this.count * 128).fill(255));
+      if (this.blkBytes) this.device.queue.writeBuffer(this.buffers.blk, 0, this.blkBytes);   // drop the other-part blockers
     }
   }
 
@@ -1316,15 +925,35 @@ export class Lighting {
   // Near-field reflection on or off (bounce.wgsl near_refl): the light visibility blocks comes back as the blockers'
   // colour, own-part blockers always, other parts' only with near-field visibility on. Off = the shipped bounce.
   setNearReflection(on) {
+    if (on && !this.blkBytes) this.initNearRefl();
     this.nearRefl = on;
     this.forceNear = true;
-    this.device.queue.writeBuffer(this.buffers.blk, 0, this.blkBytes);
+    if (this.blkBytes) this.device.queue.writeBuffer(this.buffers.blk, 0, this.blkBytes);
   }
 
-  // Near-field cones (bounce.wgsl near_cones; 8 is the default near-field method): with near-field visibility on, k wide cones (6 or 8) per
-  // Gaussian instead of the 128-cell walk, for the transmittance and (with reflection) the other-part blockers. 0 = the walk.
+  // near-field reflection's buffers, on first use: 16 (node, weight) blockers per Gaussian, 0-7 own part from the
+  // asset's blockers.bin (runtime/bake_blockers.py; none without it), 8-15 other parts (near_cones while reflection is
+  // on), and last frame's bounce; the passes that bind them get new bind groups
+  initNearRefl() {
+    const G = this.count, device = this.device;
+    const buf = (label, size) => device.createBuffer({ label, size, usage: B.STORAGE | B.COPY_DST | B.COPY_SRC });
+    this.buffers.blk = buf('near-field blockers', G * 128);
+    this.buffers.lo_b_prev = buf('last frame bounce (near-field reflection)', G * LOB * 16);
+    this.blkBytes = new Uint32Array(G * 32).fill(0xffffffff);
+    for (let i = 1; i < G * 32; i += 2) this.blkBytes[i] = 0;
+    if (this.blockersRaw) {
+      const own = new Uint32Array(this.blockersRaw);
+      for (let g = 0; g < G; g++) this.blkBytes.set(own.subarray(g * 16, g * 16 + 16), g * 32);
+    }
+    device.queue.writeBuffer(this.buffers.blk, 0, this.blkBytes);
+    Object.assign(this.bounceRes, { 27: this.buffers.blk, 28: this.buffers.lo_b_prev });
+    for (const entry of ['near_cones', 'near_refl']) this.bounce[entry].build();
+  }
+
+  // Near-field cones (bounce.wgsl near_cones): with near-field visibility on, k wide cones (6 or 8) per Gaussian for
+  // the transmittance and (with reflection) the other-part blockers
   setNearCones(k) {
-    this.nearCones = k === 6 || k === 8 ? k : 0;
+    this.nearCones = k === 6 ? 6 : 8;
     this.forceNear = true;
   }
 
@@ -1369,16 +998,31 @@ export class Lighting {
     pass.dispatchWorkgroups(Math.ceil(this.count / 64)); pass.end();
   }
 
-  encodeBounce(encoder, timers, emissive = false) {
+  // Does a part move this frame change any Gaussian's transfer (bounce.wgsl iso_xfer)? The transfer is world-frame SH
+  // of a Gaussian's rest-frame V and footprint times its near-field visibility (near_byte). With near-field visibility
+  // off that last factor is not refreshed, so only a part turning changes anything: a pure translation leaves every
+  // transfer as it was. With it on, any move may (its cones follow positions). (2026-10-31: drifting clouds, which
+  // only translate, re-ran iso_xfer over every Gaussian each frame for nothing.)
+  isoMoved(mask) {
+    if (!mask) return false;
+    const pf = this.partXf;
+    if (!pf || this.nearField || ((this.gpuMovedMask ?? 0) & mask) !== 0) return true;
+    for (let p = 0; p < Math.min(this.partCount, 32); p++) {
+      if (((mask >>> p) & 1) === 0) continue;
+      const o = p * 32;
+      for (let r = 0; r < 3; r++) for (let j = 0; j < 3; j++) if (pf[o + 4 * r + j] !== pf[o + 12 + 4 * r + j]) return true;
+    }
+    return false;
+  }
+
+  // lightStill (main.js): no lighting input changed for SETTLE_FRAMES frames, so the light toward the probes, the tree
+  // and the probes hold their settled values; only the eye-dependent reads run (the camera may be moving)
+  encodeBounce(encoder, timers, lightStill = false) {
+    lightStill &&= !this.forceNear && !this.scStale && !this.firstGather;
     const f = new Float32Array(this.params), u = new Uint32Array(this.params);
     f[12] = probeAlpha(this.firstGather);
-    // with reflection the near_vis walk is ~2x dearer, so a forced refresh is spread over frames in NEAR_CHUNK pieces
-    // (one submit for every Gaussian risks the GPU watchdog); force_near stays set until the last piece
-    // (the cones are cheap enough to refresh every Gaussian in one submit)
-    if (this.nearRefl && this.nearField && !this.nearCones && this.forceNear) this.nearNext = 0;
-    const chunked = this.nearRefl && this.nearField && !this.nearCones && this.nearNext < this.count;
-    u[13] = this.forceNear || chunked ? 1 : 0;
-    u[205] = chunked ? this.nearNext : 0;   // PP.refl.y
+    u[13] = this.forceNear ? 1 : 0;
+    u[205] = 0;   // PP.refl.y: the archived near_vis walk's chunk start
     // For the first FULL_ROUNDS rounds refresh every ray and Gaussian each frame, so the probes settle quickly.
     const sub = this.round < FULL_ROUNDS ? 1 : SUBSET;
     u[16] = sub; u[17] = this.round % sub;
@@ -1388,6 +1032,9 @@ export class Lighting {
     u[207] = this.emitterBounceFix && this.assetEmitters ? this.assetEmitters.part + 1 : 0;
     this.round++;
     this.device.queue.writeBuffer(this.buffers.probe_params, 0, this.params);
+    // iso_xfer rebuilds a Gaussian's transfer only near a part that moved, or on a forced refresh: with neither, skip
+    // the dispatch (2026-10-31: its early-out over every Gaussian still cost ~2.4 ms a frame on hill)
+    const isoStale = this.forceNear || this.isoMoved((this.movedMask ?? 0) >>> 0);
     this.forceNear = false;
     this.firstGather = false;
     const run = (entry, threads, group = 0) => {
@@ -1398,117 +1045,63 @@ export class Lighting {
       pass.dispatchWorkgroups(Math.ceil(threads / 64));
       pass.end();
     };
-    const sh = this.iso && this.shProbes;
-    if (this.nearRefl) encoder.copyBufferToBuffer(this.buffers.lo_b, 0, this.buffers.lo_b_prev, 0, this.count * 15 * 16);
-    if (this.nearField && this.nearCones) run('near_cones', this.count);
-    else if (this.nearField) run('near_vis', chunked ? Math.min(NEAR_CHUNK, this.count - this.nearNext) : this.count);
-    if (chunked) this.nearNext += NEAR_CHUNK;
-    if (sh) run('iso_xfer', this.count);
-    run(emissive ? (this.pfd && this.unified ? 'direct_dirs_emit_pfd' : 'direct_dirs_emit') : 'direct_dirs', sh ? Math.ceil(this.count / 4) : this.count);   // stage 2: 1/4 a frame
-    this.env?.encodeDirs(encoder);   // distant lights toward the probes, for the same Gaussians (environment.js)
+    if (this.nearRefl) encoder.copyBufferToBuffer(this.buffers.lo_b, 0, this.buffers.lo_b_prev, 0, this.count * LOB * 16);
+    const readBounce = () => {
+      run('bounce_dirs', Math.ceil(this.count / u[16]));
+      run('bounce_sh', u[19] ? this.count : Math.ceil(this.count / u[16]));
+      if (this.nearRefl) run('near_refl', this.count);
+    };
+    if (lightStill) { readBounce(); return; }
+    if (this.nearField) run('near_cones', this.count);
+    if (isoStale) run('iso_xfer', this.count);
+    const sc = this.senderCut;   // sender LOD: the cut's leaves and nodes only (bounce.wgsl sc_select)
+    const runInd = (entry, offset) => {
+      const { pipe, groups, timer = entry } = this.bounce[entry] ?? this.emit[entry];
+      const pass = encoder.beginComputePass({ label: entry, timestampWrites: BOUNCE_TIMERS.includes(timer) ? timers.writes(timer) : undefined });
+      pass.setPipeline(pipe); pass.setBindGroup(0, groups[0]); pass.dispatchWorkgroupsIndirect(this.scList, offset); pass.end();
+    };
+    if (sc) {
+      // the cut depends only on where the parts (and so their probes) are: re-selected when one moved
+      const reselect = this.scStale || (this.movedMask ?? 0) !== 0;
+      this.device.queue.writeBuffer(this.scList, 36, new Uint32Array([reselect ? 1 : 0]));   // word 9: every node slot refreshes
+      if (reselect) {
+        encoder.clearBuffer(this.scList, 0, 32);   // counts and dispatch sizes; word 8 (node slots) stays
+        encoder.clearBuffer(this.scList, 40, 8);   // tree slots handed out / not fitting (sc_mark)
+        this.scLevels.forEach((l, i) => run('sc_select', l.count, i));
+        run('sc_args', 1);
+        runInd('sc_xfer', 20);
+        this.checkSlots(encoder);
+        this.scStale = false;
+      }
+      runInd('sc_shadow', 20);
+      runInd('direct_dirs_emit_sc', 8);
+      runInd('direct_dirs_nodes_sc', 20);
+      this.env?.encodeDirsSC(encoder);
+    } else {
+      run('direct_dirs_emit', Math.ceil(this.count / 4));   // stage 2: 1/4 a frame
+      this.env?.encodeDirs(encoder);   // distant lights toward the probes, for the same Gaussians (environment.js)
+    }
     // senders (this frame's direct light + last frame's bounce) -> the probes gather -> each Gaussian reads its
     // bounce from this frame's probes (David, 2026-10-29: the first bounce settles in the frame things move; it used
     // to read last frame's probes, a one-frame dark trail behind a fast mover). Later bounces still lag a frame each.
-    const readBounce = () => {
-      run('bounce_dirs', Math.ceil(this.count / u[16]));
-      if (sh) run('bounce_sh', u[19] ? this.count : Math.ceil(this.count / u[16]));
-      if (this.nearRefl) run('near_refl', this.count);
-    };
     const oldOrder = new URLSearchParams(globalThis.location?.search ?? '').get('bounceorder') === 'old';   // debug: the pre-2026-10-29 order
     if (oldOrder) readBounce();
-    run('node_leaf', this.count);
-    for (let d = this.maxDepth - 1; d >= 1; d--) run('node_up', this.levelCounts[d], d);
-    run('node_sh2', this.nodeCount);
+    if (sc) {
+      runInd('node_leaf_list', 8);
+      runInd('node_cut', 20);
+      for (let d = this.maxDepth - 1; d >= 1; d--) run('node_up_sc', this.levelCounts[d], d);
+      run('node_sh2_sc', this.nodeCount);
+    } else {
+      run('node_leaf', this.count);
+      for (let d = this.maxDepth - 1; d >= 1; d--) run('node_up', this.levelCounts[d], d);
+      run('node_sh2', this.nodeCount);
+    }
     run('probe_gather', Math.ceil(this.probeCount * NCELL / u[16]));
     run('probe_valid', this.probeCount);
-    if (sh) run('probe_sh2', this.probeCount);
+    run('probe_sh2', this.probeCount);
     if (!oldOrder) readBounce();
   }
 
-  // Shadow pooling (ema.wgsl ema_light): for each Gaussian, up to 3 leaf siblings under its parent node in the same
-  // part (leaf node index == Gaussian index, SPEC 2.2), the 3 nearest by centre when the parent has more than 4 leaves.
-  // u32 x 4 per Gaussian, 0xFFFFFFFF pads; all pads (no pooling) when off.
-  poolNeighbours(asset, on) {
-    const G = this.count, out = new Uint32Array(G * 4).fill(0xffffffff);
-    if (!on) return out;
-    const nu = new Uint32Array(asset.raw.nodes), nf = new Float32Array(asset.raw.nodes), kids = new Uint32Array(asset.raw.kids);
-    const N = asset.header.buffers.nodes.count;
-    const d2 = (a, b) => (nf[a * 24] - nf[b * 24]) ** 2 + (nf[a * 24 + 1] - nf[b * 24 + 1]) ** 2 + (nf[a * 24 + 2] - nf[b * 24 + 2]) ** 2;
-    for (let i = G; i < N; i++) {
-      const leaves = [];
-      for (let j = nu[i * 24 + 19]; j < nu[i * 24 + 20]; j++) if (kids[j] < G) leaves.push(kids[j]);
-      for (const g of leaves) {
-        let nb = leaves.filter(h => h !== g && nu[h * 24 + 15] === nu[g * 24 + 15]);
-        if (nb.length > 3) nb = nb.sort((a, b) => d2(g, a) - d2(g, b)).slice(0, 3);
-        nb.forEach((h, j) => { out[g * 4 + j] = h; });
-      }
-    }
-    return out;
-  }
-
-  // ---- progressive tree lighting (runtime/wgsl/progressive.wgsl) -------------------------------------------
-
-  initProgressive(device, sources, asset) {
-    const N = asset.header.buffers.nodes.count, G = this.count;
-    const buf = (label, size, usage = B.STORAGE) => device.createBuffer({ label, size, usage: usage | B.COPY_DST | B.COPY_SRC });
-    // parent of every node, from the kids lists (SPEC 2.2); a part root and the scene root point at themselves
-    const nu = new Uint32Array(asset.raw.nodes), kids = new Uint32Array(asset.raw.kids);
-    const state = new Uint32Array(N * 4);
-    for (let i = 0; i < N; i++) { state[i * 4] = 0x3f800000; state[i * 4 + 3] = i; }   // T = 1.0, own parent
-    for (let i = 0; i < N; i++) {
-      for (let j = nu[i * 24 + 19]; j < nu[i * 24 + 20]; j++) {
-        const c = kids[j];
-        if (nu[c * 24 + 15] !== 0xffffffff && nu[i * 24 + 15] !== 0xffffffff) state[c * 4 + 3] = i;   // not under the scene root
-      }
-    }
-    this.lpInitialState = state;
-    Object.assign(this.buffers, {
-      lp_params: buf('progressive params', 32, B.UNIFORM),
-      node_light: buf('node incoming light', N * 18 * 16),
-      node_state: buf('node lighting state', N * 16),
-      work: buf('progressive worklist', (4 + LP_MAX_BUDGET) * 4),
-    });
-    this.lpReset();
-    const res = {
-      0: this.buffers.uniform, 1: this.buffers.gaussians, 2: this.buffers.nodes, 3: this.buffers.vgrid,
-      4: this.buffers.parts, 7: this.buffers.materials, 8: this.buffers.colour, 9: this.buffers.kids,
-      10: this.buffers.probe_params, 11: this.buffers.probe_data, 13: this.buffers.lo_dir, 14: this.buffers.lo_b,
-      18: this.buffers.emit_nodes, 19: this.buffers.emit_params, 21: this.buffers.lp_params,
-      22: this.buffers.node_light, 23: this.buffers.node_state, 24: this.buffers.work,
-    };
-    const module = device.createShaderModule({ label: 'progressive', code: sources.common + '\n' + sources.material_ext + '\n' + sources.progressive });
-    this.lp = {};
-    for (const [entry, binds] of Object.entries(PROGRESSIVE)) {
-      const pipe = device.createComputePipeline({ label: entry, layout: 'auto', compute: { module, entryPoint: entry } });
-      this.lp[entry] = { pipe, group: device.createBindGroup({
-        layout: pipe.getBindGroupLayout(0),
-        entries: binds.map(b => ({ binding: b, resource: { buffer: res[b] } })),
-      }) };
-    }
-    this.lpParams = new ArrayBuffer(32);
-    // M39: each leaf's iso_norm for the progressive transfer, once (uniform: just the Gaussian count)
-    const iu = new Uint32Array(16); iu[1] = G; iu[13] = this.materialCount;
-    device.queue.writeBuffer(this.buffers.uniform, 0, iu);
-    const enc = device.createCommandEncoder();
-    const pass = enc.beginComputePass({ label: 'lp_iso_init' });
-    pass.setPipeline(this.lp.lp_iso_init.pipe); pass.setBindGroup(0, this.lp.lp_iso_init.group);
-    pass.dispatchWorkgroups(Math.ceil(G / WG)); pass.end();
-    device.queue.submit([enc.finish()]);
-  }
-
-  // Forget all node light (every node unlit, histories cleared).
-  lpReset() {
-    this.device.queue.writeBuffer(this.buffers.node_state, 0, this.lpInitialState);
-    const w = new Uint32Array(4);
-    w[2] = 0x3f800000;                             // acceptance probability 1.0
-    this.device.queue.writeBuffer(this.buffers.work, 0, w);
-  }
-
-  // One frame of progressive lighting: schedule, shade up to `budget` nodes, then every leaf's transfer to the eye
-  // (and to the 14 probe directions for 1 / 8 of the leaves), then the probes' emitters and gather as before.
-  // Motion blur records (motion_blur.wgsl) before any lighting kernel reads them. A part that stopped this frame was
-  // stretched last frame, so it counts as moved once more (its opacity-map layer is re-splatted sharp); returns
-  // whether any part's records changed.
   // the moving parts' records (and last frame's movers', back to rest); nothing while everything is still
   encodeBlur(encoder) {
     const moved = this.movedMask ?? 0;
@@ -1531,50 +1124,6 @@ export class Lighting {
     return true;
   }
 
-  encodeProgressive(encoder, eye, timers, { budget, minAng, refresh, changed, resetDepth }) {
-    if (this.blur && this.encodeBlur(encoder)) changed = true;
-    this.writeUniform(eye);
-    const f = new Float32Array(this.lpParams), u = new Uint32Array(this.lpParams);
-    u[0] = Math.min(budget, LP_MAX_BUDGET); f[1] = minAng; u[2] = refresh; u[3] = resetDepth;
-    u[4] = changed ? 1 : 0; f[5] = LP_BLEND; u[6] = this.frame % 8;
-    this.device.queue.writeBuffer(this.buffers.lp_params, 0, this.lpParams);
-    const run = (entry, threads, timer) => {
-      const { pipe, group } = this.lp[entry];
-      const pass = encoder.beginComputePass({ label: entry, timestampWrites: timer ? timers.writes(timer) : undefined });
-      pass.setPipeline(pipe);
-      pass.setBindGroup(0, group);
-      pass.dispatchWorkgroups(Math.max(1, Math.ceil(threads / 64)));
-      pass.end();
-    };
-    run('lp_schedule', this.nodeCount);
-    run('lp_shade', u[0], 'lp_shade');
-    run('lp_finish', 1);
-    run('lp_transfer', this.count, 'lp_transfer');
-    run('lp_transfer_dirs', Math.ceil(this.count / 8));
-    // the probes' emitters and gather, unchanged (bounce.wgsl)
-    const pf = new Float32Array(this.params), pu = new Uint32Array(this.params);
-    pf[12] = probeAlpha(this.firstGather);
-    pu[13] = 0;
-    const sub = this.round < FULL_ROUNDS ? 1 : SUBSET;
-    pu[16] = sub; pu[17] = this.round % sub;
-    this.round++;
-    this.firstGather = false;
-    this.device.queue.writeBuffer(this.buffers.probe_params, 0, this.params);
-    const runB = (entry, threads, group = 0) => {
-      const { pipe, groups, timer = entry } = this.bounce[entry];
-      const pass = encoder.beginComputePass({ label: entry, timestampWrites: BOUNCE_TIMERS.includes(timer) ? timers.writes(timer) : undefined });
-      pass.setPipeline(pipe);
-      pass.setBindGroup(0, groups[group]);
-      pass.dispatchWorkgroups(Math.ceil(threads / 64));
-      pass.end();
-    };
-    runB('node_leaf', this.count);
-    for (let d = this.maxDepth - 1; d >= 1; d--) runB('node_up', this.levelCounts[d], d);
-    runB('node_sh2', this.nodeCount);
-    runB('probe_gather', Math.ceil(this.probeCount * NCELL / sub));
-    runB('probe_valid', this.probeCount);
-  }
-
   // Every slot empty: (v = 0, lamp 0xFFFF, count 0), SPEC §3.3.
   resetHistory() {
     const init = new Uint32Array(this.count * 8);
@@ -1582,8 +1131,9 @@ export class Lighting {
     this.device.queue.writeBuffer(this.buffers.lamp_state, 0, init);
   }
 
-  // Host-side lamp record: centre and rectangle half-axes (SPEC §2.5).
-  setLamp(index, center, size, prevCenter, emissive = false) {
+  // Host-side lamp record (SPEC §2.5): the emitter light's motion descriptor for the shadow history (centre and last
+  // centre); the analytic lamp it once described as a light is gone (David, 2026-10-29)
+  setLamp(index, center, prevCenter) {
     // unified lights: one sphere record per light for ema_light's motion test, from the parts' transforms (each
     // frame, so the last centre is last frame's)
     if (this.unified) {
@@ -1591,17 +1141,9 @@ export class Lighting {
       return;
     }
     const f = new Float32Array(this.lampBytes);
-    const base = new Float32Array(this.baseLamps);
     const o = index * 24;
-    // An emissive asset ships its analytic lamp disabled. It is enabled in both modes: the emitter light uses
-    // lamps[0] as the shadow history's motion descriptor, and the analytic comparison mode lights with it. In that
-    // mode it sits 1.5 cm in front of the emitter panel, so the panel's own Gaussians do not shadow it.
-    const shift = this.assetEmitters && !emissive ? 0.015 : 0;
-    const nrm = [...base.subarray(o + 12, o + 15)];
-    f.set(center.map((v, k) => v + shift * nrm[k]), o);
-    for (const k of [16, 32].map(b => o + b / 4)) for (let j = 0; j < 3; j++) f[k + j] = base[k + j] * size;
-    f[o + 7] = base[o + 7] * size;            // sphere radius
-    f.set(prevCenter.map((v, k) => v + shift * nrm[k]), o + 20);
+    f.set(center, o);
+    f.set(prevCenter, o + 20);
     if (this.assetEmitters) new Uint32Array(this.lampBytes)[o + 15] = 1;
     this.device.queue.writeBuffer(this.buffers.lamps, 0, this.lampBytes);
   }
@@ -1635,12 +1177,12 @@ export class Lighting {
     this.device.queue.writeBuffer(this.buffers.materials, 0, this.materialBytes);
   }
 
-  // Per material for project.wgsl's RenderFrame.mat_view (16 slots): coverage peak (flags bit 5, pad0's high half),
+  // Per material for project.wgsl's RenderFrame.mat_view (32 slots: mat_view, then mat_view_ext): coverage peak (flags bit 5, pad0's high half),
   // Fresnel F0, specular weight k, and flags (1 coverage set, 2 emissive: no view reflection). Reflection coverage,
   // experiments/reflection_coverage.
   materialView(f0 = 0.04, f0Coverage = f0) {   // f0Coverage: glass (coverage materials) only, e.g. a stylized 0.2
-    const u = new Uint32Array(this.materialBytes), out = new Float32Array(64);
-    for (let m = 0; m < Math.min(this.materialCount, 16); m++) {
+    const u = new Uint32Array(this.materialBytes), out = new Float32Array(128);
+    for (let m = 0; m < Math.min(this.materialCount, 32); m++) {
       const fl = u[m * 8 + 5], p0 = u[m * 8 + 6], em = (fl & 1) !== 0;
       out.set([fl & 32 ? fromHalf(p0 >>> 16) : 0, fl & 32 ? f0Coverage : f0, !em && fl & 8 ? fromHalf(p0 & 0xffff) : 0, (fl & 32 ? 1 : 0) | (em ? 2 : 0)], 4 * m);
     }
@@ -1689,9 +1231,9 @@ export class Lighting {
     u[0] = this.frame++; u[1] = this.count; u[2] = this.partCount; u[3] = this.lampCount;
     f[4] = THETA; f[5] = ALPHA_MIN; f[6] = ALPHA_PART; u[7] = 1;      // one slot per lamp (SPEC §3.3 stub)
     f.set(eye, 8); u[11] = STRATUM_STEP;
-    u[12] = this.lightSamplesAxis; u[13] = this.materialCount; u[14] = this.historyMode;   // 1: N5 count rule (SPEC 3.3)
-    u[15] = (this.iso ? 1 : 0) | (this.iso && this.shProbes ? 2 : 0) | (this.iso && this.asgSpec ? 4 : 0) | (this.iso && this.transmit ? 8 : 0)   // M39 transfer (bit 0), SH2 probes (bit 1), P3 ASG probe cells toward the eye (bit 2), M41 transmission (bit 3)
-      | (this.iso && this.specSplit ? 16 : 0) | (this.iso && this.sheen ? 32 : 0);   // reflection coverage: specular toward the eye kept apart (bit 4), view-only probe sheen (bit 5)
+    u[12] = this.lightSamplesAxis; u[13] = this.materialCount;
+    u[15] = 1 | 2 | (this.asgSpec ? 4 : 0) | (this.transmit ? 8 : 0)   // M39 transfer (bit 0), SH2 probes (bit 1), P3 ASG probe cells toward the eye (bit 2), M41 transmission (bit 3)
+      | (this.specSplit ? 16 : 0) | (this.sheen ? 32 : 0);   // reflection coverage: specular toward the eye kept apart (bit 4), view-only probe sheen (bit 5)
     this.device.queue.writeBuffer(this.buffers.uniform, 0, this.uniform);
   }
 
@@ -1710,43 +1252,24 @@ export class Lighting {
   }
 
   // changed: a part or the light moved this frame (shadow_cull's answer only changes then; the camera does not matter)
-  encode(encoder, eye, timers, emissive = false, changed = true) {
+  // Direct light: the shadows (one opacity map per light for unified lights, lights_map.js; the emitter light's map
+  // otherwise, light_shadow.js), then shade_emit (the LOD cut's leaves with ?lodlight=2), then the distant lights.
+  // lightStill (main.js): nothing the shadow maps depend on changed for a while, so they are not touched
+  encode(encoder, eye, timers, changed = true, lightStill = false) {
     this.writeUniform(eye);
     if (this.blur && this.encodeBlur(encoder)) changed = true;
-    const groups = Math.ceil(this.count / WG);
-    let entries = emissive ? [this.pfield && this.unified ? 'walk_emit_pf' : 'walk_emit', this.unified ? 'ema_light' : 'ema', 'shade_emit'] : KERNELS.map(k => k[1]);
-    if (emissive && this.pfd && this.unified) { entries = this.cluster ? ['cluster_T', 'shade_emit_pfd'] : ['shade_emit_pfd']; this.writePfBounds(); }   // field shadows per cut node: no walk, cull or history
-    if (changed) this.hsDirty = true;
-    // no lamp: only the shade pass (its lamp term is zero), no lamp shadow walk or history over every Gaussian
-    if (this.lampOff) entries = entries.filter(e => e.startsWith('shade') || e === 'cluster_T');
-    // light-side shadows (light_shadow.js, off by default) in place of the cull, walk and history
-    if (this.lampOff) { /* no lamp shadows */ }
-    else if (emissive && !this.unified && this.lightShadow?.method && this.lightShadow.encode(encoder, timers, this.blur ? this.blurMask : this.movedMask ?? 0, changed)) {
-      entries = ['shade_emit'];
-    } else if (emissive && this.hierShadow && this.blur && this.blurMask && !(this.pfd && this.unified)) {
-      // motion blur: shadow_cull's rest-frame node boxes do not cover a stretched part, so while one is stretched
-      // (or just stopped) every Gaussian walks; the cull runs again on the next frame
-      encoder.clearBuffer(this.buffers.node_status);
-      this.hsDirty = true;
-    } else if (emissive && this.hierShadow && this.hsDirty && !(this.pfd && this.unified)) {
-      this.hsDirty = false;
-      // shadow_cull per depth, part roots first, before walk_emit reads the leaves' status (untimed: one slot per pass)
-      this.hsLevels.forEach((l, k) => {
-        const pass = encoder.beginComputePass({ label: 'shadow_cull' });
-        pass.setPipeline(this.hs.shadow_cull.pipe); pass.setBindGroup(0, this.hs.shadow_cull.groups[k]);
-        pass.dispatchWorkgroups(Math.ceil(l.count / WG)); pass.end();
-      });
-    }
-    if (this.lodCut) entries = entries.map(e => e === 'shade_emit' ? 'shade_emit_list' : e);   // ?lodlight=2: the cut only
-    for (const entry of entries) {
-      const e = this.emit[entry];
-      const pass = encoder.beginComputePass({ label: entry, timestampWrites: timers.writes(e?.timer ?? (entry === 'ema_light' ? 'ema' : entry)) });   // ema_light reports into ema's slot
-      pass.setPipeline(e?.pipe ?? this.pipelines[entry]);
-      pass.setBindGroup(0, e?.groups[0] ?? this.groups[entry]);
-      if (entry === 'shade_emit_list') pass.dispatchWorkgroupsIndirect(this.lodList, 16);   // lod_args: the leaf list
-      else pass.dispatchWorkgroups(groups);
-      pass.end();
-    }
-    this.env?.encodeDirect(encoder, timers, changed);   // distant lights (sun) on top of shade_emit (environment.js)
+    const moved = (this.blur ? this.blurMask : this.movedMask) ?? 0;
+    if (this.lampOff || (lightStill && !changed && moved === 0)) { /* no lamp, or nothing moved: the maps hold */ }
+    else if (this.unified) this.lightsMap.encode(encoder, moved);
+    else this.lightShadow?.encode(encoder, timers, moved, changed);
+    const entry = this.lodCut ? 'shade_emit_list' : 'shade_emit';
+    const e = this.emit[entry];
+    const pass = encoder.beginComputePass({ label: entry, timestampWrites: timers.writes(e.timer) });
+    pass.setPipeline(e.pipe);
+    pass.setBindGroup(0, e.groups[0]);
+    if (this.lodCut) pass.dispatchWorkgroupsIndirect(this.lodList, 16);   // lod_args: the leaf list
+    else pass.dispatchWorkgroups(Math.ceil(this.count / WG));
+    pass.end();
+    this.env?.encodeDirect(encoder, timers, changed, lightStill && !changed && moved === 0);   // distant lights (sun) on top of shade_emit (environment.js)
   }
 }

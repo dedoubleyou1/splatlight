@@ -9,7 +9,8 @@
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3u) {
   let i = gid.x;
-  let last = select(frame.count + u32(frame.palette[3].y), frame.lod.y + frame.lod.z - 1u, frame.lod.x != 0u);   // + LOD nodes
+  var last = select(frame.count + u32(frame.palette[3].y), frame.lod.y + frame.lod.z - 1u, frame.lod.x != 0u);   // + LOD nodes
+  if (frame.particles.y != 0u) { last = frame.particles.x + frame.particles.y - 1u; }   // + Gaussian particles
   if (i > last) { return; }
   let key = keys[i];
   if (key == INVALID_KEY) { return; }

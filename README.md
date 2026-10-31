@@ -2,7 +2,8 @@
 
 A browser demo of a fully relightable volumetric Gaussian-splat renderer (WebGPU): every Gaussian carries
 material properties and is lit at runtime by emissive Gaussian lights, sky and sun, with bounce light, shadows
-and motion blur. The initial scene is a Cornell box.
+and motion blur. Two scenes: a Cornell box with live box physics, and a hill with a tree under a physical clear
+sky with drifting clouds (`?scene=hill`).
 
 Extracted from the GS Game Engine research repository; only the real-time web renderer lives here.
 
@@ -19,4 +20,4 @@ wheel to dolly.
     src/                       host code (boot, renderer, lighting, UI)
     shaders/                   splat pipeline WGSL (project, sort, splat, display)
     runtime/wgsl/              lighting kernels WGSL
-    runtime/assets/            the Cornell box asset (runtime/SPEC format) and environment presets
+    runtime/assets/            the Cornell box and hill_lite assets (runtime/SPEC format), physics bakes, environment presets

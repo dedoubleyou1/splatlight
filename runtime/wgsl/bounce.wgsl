@@ -18,7 +18,7 @@
 // Cells everywhere use the V grid layout (SPEC 2.3): 8 rows of elevation from the zenith x 16 columns of azimuth.
 
 const NCELL: u32 = 128u;
-const HIT_MAX: u32 = 24u;
+const HIT_MAX: u32 = 16u;   // probe_gather's hit list; a full list folds the rest into its last entry (2026-10-30)
 
 struct ProbeParams {
     lo: vec3f, n_axis: u32,              // probe lattice origin (world) and probes per axis
@@ -48,7 +48,7 @@ struct ProbeParams {
     // only by the object's own Gaussians, trilinear without Chebyshev. Movable parts keep their 8 probes at 8 q
     // (vol_info.x = 8 x parts of them, before the volumes).
     vols: array<vec4u, 32>,
-    vol_info: vec4u,
+    vol_info: vec4u,                     // x: part probes before the volumes; y = 1: every gather keeps the block margin (?probemargin=old)
     // node probes (renderer ?nodeprobes=1, NODE_PROBES, 2026-10-28): per movable part PART_PROBES_PER probes at its
     // tree patches, rest frame: xyz = just outside the patch along its facing direction, w = blend radius (m)
     nodep: array<vec4f, 256>,
@@ -85,16 +85,49 @@ struct Level { depth: u32, r0: u32, r1: u32, r2: u32 }
 @group(0) @binding(3) var<storage, read> vgrid: array<VGrid>;
 @group(0) @binding(4) var<storage, read> parts: array<Part>;
 @group(0) @binding(5) var<storage, read> lamps: array<Lamp>;
-@group(0) @binding(6) var<storage, read> lamp_state: array<LampState>;
+@group(0) @binding(6) var<storage, read_write> lamp_state: array<LampState>;   // read_write: sc_shadow
 @group(0) @binding(7) var<storage, read> materials: array<Material>;
 @group(0) @binding(9) var<storage, read> kids: array<u32>;
 @group(0) @binding(10) var<uniform> PP: ProbeParams;
 @group(0) @binding(11) var<storage, read_write> probe_data: array<vec4f>;   // per ray: (rgb, first-hit part), (m1, m2, valid, near)
 @group(0) @binding(12) var<storage, read_write> nearvis: array<VGrid>;      // per Gaussian, world cells
-@group(0) @binding(13) var<storage, read_write> lo_dir: array<vec4f>;       // per Gaussian x 14: direct toward D_k
-@group(0) @binding(14) var<storage, read_write> lo_b: array<vec4f>;         // per Gaussian x 15: bounce toward D_k, eye
-@group(0) @binding(15) var<storage, read_write> node_acc: array<vec4f>;     // per node x 14: (sum w L, sum w)
-@group(0) @binding(16) var<storage, read_write> node_sh: array<vec4f>;      // per node x 9: SH2 rgb
+@group(0) @binding(13) var<storage, read_write> lo_dir: array<vec4f>;       // per Gaussian: direct toward the probes (common.wgsl LOB)
+@group(0) @binding(14) var<storage, read_write> lo_b: array<vec4f>;         // per Gaussian x LOB: bounce toward the eye, the probes; lanes
+// Tree nodes' light toward the probes, per TREE SLOT, not per node (2026-10-30, GPU-memory cut): sc_flag[n] >> 2 is
+// node n's slot. With sender LOD (sc_select) only the nodes the gather can reach (OPEN, the cut's NODEs and LEAFs)
+// get one, handed out when the cut is re-selected; the rest point at the null slot, the arrays' last entry, which
+// stays zero (it is never written). Without sender LOD the host fills sc_flag with slot = node index.
+@group(0) @binding(15) var<storage, read_write> node_acc: array<vec4f>;     // per slot x 14: (sum w L, sum w)
+@group(0) @binding(16) var<storage, read_write> node_sh: array<u32>;        // per slot x 14 words: SH2 rgb as 27 halves
+@group(0) @binding(80) var<storage, read_write> sc_flag: array<u32>;        // per node: sender-cut state (bits 0-1) | slot << 2
+
+fn tree_slot(n: u32) -> u32 { return sc_flag[n] >> 2u; }
+fn acc_null() -> u32 { return arrayLength(&node_acc) / 14u - 1u; }
+fn sh_null() -> u32 { return arrayLength(&node_sh) / 14u - 1u; }
+
+// a tree node's outgoing light as the probes see it (node_sh2's SH2 fit). Readers go through these two, so the
+// storage behind them can change without touching them. Valid for nodes the gather can use; with sender LOD, nodes
+// under the cut read zero.
+fn node_sh_at(ni: u32, m: u32) -> vec3f {
+    let s = tree_slot(ni);
+    if (s >= sh_null()) { return vec3f(0.0); }
+    let o = s * 14u;
+    let a = 3u * m;
+    let h0 = unpack2x16float(node_sh[o + a / 2u]);
+    let h1 = unpack2x16float(node_sh[o + a / 2u + 1u]);
+    return select(vec3f(h0.y, h1.x, h1.y), vec3f(h0.x, h0.y, h1.x), (a & 1u) == 0u);
+}
+
+// radiance node ni sends along the direction whose SH2 basis is b (sh2_basis of the travel direction reversed), unclamped
+fn node_radiance(ni: u32, b: array<f32, 9>) -> vec3f {
+    let s = tree_slot(ni);
+    if (s >= sh_null()) { return vec3f(0.0); }
+    var h: array<f32, 28>;
+    for (var j = 0u; j < 14u; j++) { let p = unpack2x16float(node_sh[s * 14u + j]); h[2u * j] = p.x; h[2u * j + 1u] = p.y; }
+    var v = vec3f(0.0);
+    for (var m = 0u; m < 9u; m++) { v += b[m] * vec3f(h[3u * m], h[3u * m + 1u], h[3u * m + 2u]); }
+    return v;
+}
 @group(0) @binding(17) var<uniform> LV: Level;
 @group(0) @binding(29) var<storage, read> up_nodes: array<u32>;   // node_up: internal nodes by depth
 // M39 stage 2 (U.iso == 3: direction-independent transfer with SH2 probes)
@@ -216,7 +249,7 @@ struct PartProbeFrame { c: vec3f, h: vec3f }
 // so a probe sees what its patch sees; Gaussians blend their part's nearest probes by distance. lighting.js patches
 // these two constants (16, true) when ?nodeprobes=1.
 const PART_PROBES_PER: u32 = 8u;
-const NODE_PROBES: bool = false;
+const NODE_PROBES: bool = false;   // node probes: archived 2026-10-29 (the renderer no longer switches them on)
 
 fn part_probe_frame(q: u32) -> PartProbeFrame { return part_probe_frame_raw(q); }
 
@@ -230,6 +263,13 @@ fn part_probe_frame_raw(q: u32) -> PartProbeFrame {
 
 fn is_part_probe_part(q: u32) -> bool {
     return PP.part_probes > 0u && q < PP.vol_info.x / PART_PROBES_PER && (parts[q].flags & 1u) == 0u;
+}
+
+// near-field visibility of Gaussian g toward cell c; 1 while near field has never been on (lighting.js allocates nearvis
+// on first use and binds a one-entry placeholder until then)
+fn near_byte(g: u32, c: u32) -> f32 {
+    if (g >= arrayLength(&nearvis)) { return 1.0; }
+    return grid_byte(nearvis[g], c);
 }
 
 fn grid_byte(v: VGrid, c: u32) -> f32 {
@@ -680,6 +720,7 @@ fn direct_dirs(@builtin(global_invocation_id) gid: vec3u) {
             m += 1u;
         }
     }
+    var mean = vec3f(0.0);   // the mean over the 14 directions (common.wgsl LOB: one value toward the probes)
     if ((U.iso & 1u) != 0u) {                     // M39: one colour for every direction, plus specular flakes' lobe
         for (var k = 0u; k < 14u; k++) {
             let wo = xf_dir_inv(xf, PP.dirs[k].xyz);
@@ -689,8 +730,9 @@ fn direct_dirs(@builtin(global_invocation_id) gid: vec3u) {
                 let damp = iso_damp(iso_norm(nd), footprint(nd, fl.detC, wr) * vgrid_lookup(vgrid[g], wr));
                 c += ws[s] * iso_lobe(mat, fl.Sd, fl.So, wis[s], wo, damp);
             }
-            lo_dir[g * 14u + k] = vec4f(G.albedo * c * iso_norm(nd), 0.0);
+            mean += c / 14.0;
         }
+        lo_dir[g] = vec4f(G.albedo * mean * iso_norm(nd), 0.0);
         return;
     }
     for (var k = 0u; k < 14u; k++) {
@@ -702,8 +744,9 @@ fn direct_dirs(@builtin(global_invocation_id) gid: vec3u) {
             let f = select(1.0, fsame, dot(wis[s], fl.n) * on > 0.0);
             c += ws[s] * (phase_ex(mat, fl.n, fl.Sd, fl.So, wis[s], wo) * f);
         }
-        lo_dir[g * 14u + k] = vec4f(G.albedo * c / footprint(nd, fl.detC, wo), 0.0);
+        mean += G.albedo * c / footprint(nd, fl.detC, wo) / 14.0;
     }
+    lo_dir[g] = vec4f(mean, 0.0);
 }
 
 // ---- bounce: probes -> Gaussian ------------------------------------------------------------------------------
@@ -854,7 +897,7 @@ fn bounce_dirs(@builtin(global_invocation_id) gid: vec3u) {
     let fl = flake_of(G, mat);
 
     // stage 2: matte Gaussians take the bounce from bounce_sh; only specular flakes need the per-cell lobe here
-    if ((U.iso & 3u) == 3u && spec_weight(mat) <= 0.0) { return; }
+    if ((U.iso & 3u) == 3u && (spec_weight(mat) <= 0.0 || gloss_from_sh(mat))) { return; }   // bounce_sh has these
     let pw = probe_weights(P, own);
     var pid = pw.pid;      // var: indexed at runtime below
     var wk = pw.w;
@@ -889,7 +932,7 @@ fn bounce_dirs(@builtin(global_invocation_id) gid: vec3u) {
         }
         if (L.r + L.g + L.b <= 0.0) { continue; }
         let u = xf_dir_inv(xf, cell_dir(c));
-        let vis = vgrid_lookup(vgrid[g], u) * grid_byte(nearvis[g], c);
+        let vis = vgrid_lookup(vgrid[g], u) * near_byte(g, c);
         if (vis <= 0.0) { continue; }
         let lin = L * (vis * footprint(nd, fl.detC, u) * cell_omega(c));
         if (iso) {
@@ -916,17 +959,28 @@ fn bounce_dirs(@builtin(global_invocation_id) gid: vec3u) {
         }
     }
     if (iso) {
-        for (var k = 0u; k < 15u; k++) {
-            lo_b[g * 15u + k] = vec4f(G.albedo * select(acc[k], acc[0], ks <= 0.0) * iso_norm(nd), 0.0);
+        var send = acc[0];
+        if (ks > 0.0) {   // shiny: the mean over the 14 directions weighted as node_leaf weights them (footprint x V)
+            send = vec3f(0.0);
+            var ws = 0.0;
+            for (var k = 0u; k < 14u; k++) {
+                let w = footprint(nd, fl.detC, wo[k]) * vgrid_lookup(vgrid[g], wo[k]);
+                send += acc[k] * w; ws += w;
+            }
+            send /= max(ws, 1e-20);
         }
-        // the eye's specular bounce in the spare w lanes of slots 12-14 (project.wgsl reads them with coverage on)
-        let sb = G.albedo * spec14 * iso_norm(nd);
-        lo_b[g * 15u + 12u].w = sb.r; lo_b[g * 15u + 13u].w = sb.g; lo_b[g * 15u + 14u].w = sb.b;
+        let s = G.albedo * iso_norm(nd);
+        lo_b[g * LOB + LOB_EYE] = vec4f(s * select(acc[14], acc[0], ks <= 0.0), 0.0);
+        lo_b[g * LOB + LOB_SEND] = vec4f(s * send, 0.0);
+        // the eye's specular bounce (project.wgsl reads the lanes with coverage on)
+        lo_b[g * LOB + LOB_LANES] = vec4f(s * spec14, 0.0);
         return;
     }
-    for (var k = 0u; k < 15u; k++) {
-        lo_b[g * 15u + k] = vec4f(G.albedo * acc[k] / footprint(nd, fl.detC, wo[k]), 0.0);
-    }
+    var send = vec3f(0.0);
+    for (var k = 0u; k < 14u; k++) { send += G.albedo * acc[k] / footprint(nd, fl.detC, wo[k]) / 14.0; }
+    lo_b[g * LOB + LOB_EYE] = vec4f(G.albedo * acc[14] / footprint(nd, fl.detC, wo[14]), 0.0);
+    lo_b[g * LOB + LOB_SEND] = vec4f(send, 0.0);
+    lo_b[g * LOB + LOB_LANES] = vec4f(0.0);
 }
 
 // ---- M39 stage 2: SH2 probes ----------------------------------------------------------------------------------
@@ -959,7 +1013,7 @@ fn iso_xfer(@builtin(global_invocation_id) gid: vec3u) {
     for (var c = 0u; c < NCELL; c++) {
         let w = cell_dir(c);
         let u = xf_dir_inv(xf, w);
-        let v = vgrid_lookup(vgrid[g], u) * grid_byte(nearvis[g], c);
+        let v = vgrid_lookup(vgrid[g], u) * near_byte(g, c);
         if (v <= 0.0) { continue; }
         let a = inorm * footprint(nd, s3 * s3, u) * v * cell_omega(c);
         let y = sh2_basis(w);
@@ -993,7 +1047,9 @@ fn bounce_sh(@builtin(global_invocation_id) gid: vec3u) {
     let g = select(gid.x * PP.subset + PP.phase, gid.x, PP.sh_full != 0u);
     if (g >= U.gaussian_count || (U.iso & 3u) != 3u) { return; }
     let G = gaussians[g];
-    if (spec_weight(material_of(G)) > 0.0) { return; }        // bounce_dirs handles shiny materials
+    let mat = material_of(G);
+    let ks = spec_weight(mat);
+    if (ks > 0.0 && !gloss_from_sh(mat)) { return; }        // bounce_dirs handles near-mirror materials
     let own = G.part_surface & 0xFFFFu;
     let P = xf_point(parts[own].xf, G.mu);
     var pw = probe_weights(P, own);
@@ -1008,27 +1064,70 @@ fn bounce_sh(@builtin(global_invocation_id) gid: vec3u) {
     let c = t0.x * Lsh[0] + t0.y * Lsh[1] + t0.z * Lsh[2] + t0.w * Lsh[3] + t1.x * Lsh[4] + t1.y * Lsh[5]
           + t1.z * Lsh[6] + t1.w * Lsh[7] + t2.x * Lsh[8];
     let cb = vec4f(G.albedo * max(c, vec3f(0.0)), 0.0);
-    for (var k = 0u; k < 15u; k++) { lo_b[g * 15u + k] = cb; }
+    lo_b[g * LOB + LOB_EYE] = cb;
+    lo_b[g * LOB + LOB_SEND] = cb;
+    lo_b[g * LOB + LOB_LANES] = vec4f(0.0);
+    if (ks > 0.0) {   // glossy: the diffuse share as above, the specular share from the probes' SH2 (gloss_sh)
+        let sp = gloss_sh(g, G, mat, ks, P, own, Lsh);
+        let split = (U.iso & 16u) != 0u;   // reflection coverage: the highlight in the lanes (project.wgsl)
+        lo_b[g * LOB + LOB_EYE] = vec4f(cb.rgb * (1.0 - ks) + select(sp, vec3f(0.0), split), 0.0);
+        if (split) { lo_b[g * LOB + LOB_LANES] = vec4f(sp, 0.0); }
+        return;
+    }
     // view-only sheen (U.iso bit 5, Fresnel in project.wgsl): the probes' SH2 radiance from the eye's mirror direction
-    // about the short axis (two-sided), uncoloured, into the spare w lanes of slots 12-14. Evaluated here because
-    // project.wgsl has no binding left for the probes; it never feeds back into lighting.
+    // about the short axis (two-sided), uncoloured, into the lanes. Evaluated here because project.wgsl has no binding
+    // left for the probes; it never feeds back into lighting.
     if ((U.iso & 32u) != 0u) {
         let n = normalize(xf_dir(parts[own].xf, quat_matrix(G.quat)[0]));
         let y = sh2_basis(mirror(normalize(U.eye - P), n));
         var sh = vec3f(0.0);
         for (var m = 0u; m < 9u; m++) { sh += y[m] * Lsh[m]; }
         sh = max(sh, vec3f(0.0));
-        lo_b[g * 15u + 12u].w = sh.r; lo_b[g * 15u + 13u].w = sh.g; lo_b[g * 15u + 14u].w = sh.b;
+        lo_b[g * LOB + LOB_LANES] = vec4f(sh, 0.0);
     }
+}
+
+// Glossy bounce from the probes' SH2 (David, 2026-10-30: shiny grass made bounce_dirs' 128-cell walk crawl on the
+// hill). bounce_dirs gives the eye alb iso_norm sum_c Lin_c iso_lobe; its specular share
+// k 4 pi p_spec(u_c, w_o) damp, with the phase normalised and peaked at the mirror direction w_m of w_o about the
+// flake normal, is about k 4 pi damp L~(w_m) V(w_m) A(w_m): L~ the probes' SH2 at w_m blurred by the reflected lobe
+// (bands scaled exp(-l (l + 1) s^2 / 2), s = 2 x the flake lobe's angular width). Same lobe energy, no per-cell
+// walk; SH2 can't hold a sharp reflection, so near-mirror materials (lobe narrower than GLOSS_SH_MIN) keep the walk.
+// Toward the probes a glossy Gaussian sends its matte value (the lobe averages to about 1 over directions).
+const GLOSS_SH_MIN: f32 = 0.1;   // lobe width (rad) from which the SH2 path is used
+
+fn gloss_lobe_w(mat: Material) -> f32 { return sqrt(min(mat.flake.y, mat.flake.z) / max(mat.flake.x, 1e-12)); }
+fn gloss_from_sh(mat: Material) -> bool { return (U.iso & 3u) == 3u && gloss_lobe_w(mat) >= GLOSS_SH_MIN; }
+
+fn gloss_sh(g: u32, G: Gaussian, mat: Material, ks: f32, P: vec3f, own: u32, Lsh: array<vec3f, 9>) -> vec3f {
+    let xf = parts[own].xf;
+    let nd = nodes[g];
+    let n = quat_matrix(G.quat)[0];                              // rest frame
+    let wo = xf_dir_inv(xf, normalize(U.eye - P));
+    let wm = mirror(wo, n);                                     // where the light comes from (rest frame)
+    let s3 = G.scale.x * G.scale.y * G.scale.z;
+    let detC = s3 * s3;
+    let vis = vgrid_lookup(vgrid[g], wm) * footprint(nd, detC, wm);
+    if (vis <= 0.0) { return vec3f(0.0); }
+    let inorm = iso_norm(nd);
+    let damp = iso_damp(inorm, footprint(nd, detC, wo) * vgrid_lookup(vgrid[g], wo));   // w_r = mirror of w_m = w_o
+    let sg = 2.0 * gloss_lobe_w(mat);
+    let a1 = exp(-sg * sg);           // l = 1: exp(-2 s^2 / 2)
+    let a2 = exp(-3.0 * sg * sg);     // l = 2: exp(-6 s^2 / 2)
+    let y = sh2_basis(xf_dir(xf, wm));
+    var L = y[0] * Lsh[0];
+    for (var m = 1u; m < 4u; m++) { L += a1 * y[m] * Lsh[m]; }
+    for (var m = 4u; m < 9u; m++) { L += a2 * y[m] * Lsh[m]; }
+    return G.albedo * inorm * ks * 4.0 * PI * damp * max(L, vec3f(0.0)) * vis;
 }
 
 // ---- near-field reflection: the blockers' colour into the bounce ----------------------------------------------
 
-// blocker i's outgoing colour: a leaf's direct + last frame's bounce (slot 0: matte ones show it toward every
-// direction), a parent's emitter SH2 at DC (its mean over directions)
+// blocker i's outgoing colour: a leaf's direct + last frame's bounce toward the probes, a parent's emitter SH2 at DC
+// (its mean over directions)
 fn blocker_colour(i: u32) -> vec3f {
-    if (i < U.gaussian_count) { return colour[i].rgb + lo_b_prev[i * 15u].rgb; }
-    return max(node_sh[i * 9u].rgb * 0.282095, vec3f(0.0));
+    if (i < U.gaussian_count) { return colour[i].rgb + lo_b_prev[i * LOB + LOB_SEND].rgb; }
+    return max(node_sh_at(i, 0u) * 0.282095, vec3f(0.0));
 }
 
 // Per Gaussian whose lo_b bounce_sh / bounce_dirs rewrote this frame (M39 only), after them: R = alb iso_norm
@@ -1057,8 +1156,8 @@ fn near_refl(@builtin(global_invocation_id) gid: vec3u) {
     let inorm = iso_norm(nodes[g]);
     let r = inorm * wown;
     let add = G.albedo * inorm * R - r * colour[g].rgb;
-    for (var k = 0u; k < 15u; k++) {
-        lo_b[g * 15u + k] = vec4f((lo_b[g * 15u + k].rgb + add) / (1.0 + r), lo_b[g * 15u + k].w);   // w: coverage lanes
+    for (var k = 0u; k < 2u; k++) {   // the eye and the probes' bounce (LOB_EYE, LOB_SEND); the lanes stay
+        lo_b[g * LOB + k] = vec4f((lo_b[g * LOB + k].rgb + add) / (1.0 + r), 0.0);
     }
 }
 
@@ -1066,8 +1165,11 @@ fn near_refl(@builtin(global_invocation_id) gid: vec3u) {
 
 @compute @workgroup_size(64)
 fn node_leaf(@builtin(global_invocation_id) gid: vec3u) {
-    let g = gid.x;
-    if (g >= U.gaussian_count) { return; }
+    if (gid.x >= U.gaussian_count) { return; }
+    node_leaf_one(gid.x);
+}
+
+fn node_leaf_one(g: u32) {
     let G = gaussians[g];
     let nd = nodes[g];
     let xf = parts[G.part_surface & 0xFFFFu].xf;
@@ -1077,42 +1179,57 @@ fn node_leaf(@builtin(global_invocation_id) gid: vec3u) {
     // their light reaches the room only as direct light (near_refl skips them the same way). Weight kept: the lamp
     // still occludes what is behind it. (By part, not material: node_leaf has no materials binding.)
     let dark = PP.refl.w != 0u && (G.part_surface & 0xFFFFu) == PP.refl.w - 1u;
+    let t = tree_slot(g);
+    if (t >= acc_null()) { return; }
     for (var k = 0u; k < 14u; k++) {
         let wo = xf_dir_inv(xf, PP.dirs[k].xyz);
         let w = footprint(nd, s3 * s3, wo) * vgrid_lookup(vgrid[g], wo);
-        let L = select(lo_dir[g * 14u + k].rgb + lo_b[g * 15u + k].rgb, vec3f(0.0), dark);
-        node_acc[g * 14u + k] = vec4f(L * w, w);
+        let L = select(lo_dir[g].rgb + lo_b[g * LOB + LOB_SEND].rgb, vec3f(0.0), dark);
+        node_acc[t * 14u + k] = vec4f(L * w, w);
     }
 }
 
 @compute @workgroup_size(64)
 fn node_up(@builtin(global_invocation_id) gid: vec3u) {
     if (gid.x >= LV.r1) { return; }
-    let i = up_nodes[LV.r0 + gid.x];   // this depth's internal nodes (lighting.js levels: r0 offset, r1 count)
+    node_up_one(up_nodes[LV.r0 + gid.x]);   // this depth's internal nodes (lighting.js levels: r0 offset, r1 count)
+}
+
+fn node_up_one(i: u32) {
     if (i < U.gaussian_count || i >= PP.node_count) { return; }
     let nd = nodes[i];
     if (nd.depth != LV.depth || nd.part == 0xFFFFFFFFu) { return; }
+    let t = tree_slot(i);
+    if (t >= acc_null()) { return; }
     for (var k = 0u; k < 14u; k++) {
         var s = vec4f(0.0);
-        for (var j = nd.child_lo; j < nd.child_hi; j++) { s += node_acc[kids[j] * 14u + k]; }
-        node_acc[i * 14u + k] = s;
+        for (var j = nd.child_lo; j < nd.child_hi; j++) { s += node_acc[tree_slot(kids[j]) * 14u + k]; }
+        node_acc[t * 14u + k] = s;
     }
 }
 
 @compute @workgroup_size(64)
 fn node_sh2(@builtin(global_invocation_id) gid: vec3u) {
-    let i = gid.x;
-    if (i >= PP.node_count) { return; }
+    if (gid.x >= PP.node_count) { return; }
+    node_sh2_one(gid.x);
+}
+
+fn node_sh2_one(i: u32) {
+    let t = tree_slot(i);
+    if (t >= sh_null() || t >= acc_null()) { return; }
     var L: array<vec3f, 14>;
     for (var k = 0u; k < 14u; k++) {
-        let a = node_acc[i * 14u + k];
+        let a = node_acc[t * 14u + k];
         L[k] = a.rgb / max(a.w, 1e-12);
     }
+    var h: array<f32, 28>;
+    h[27] = 0.0;
     for (var m = 0u; m < 9u; m++) {
         var c = vec3f(0.0);
         for (var k = 0u; k < 14u; k++) { c += pinv_at(m, k) * L[k]; }
-        node_sh[i * 9u + m] = vec4f(c, 0.0);
+        h[3u * m] = c.x; h[3u * m + 1u] = c.y; h[3u * m + 2u] = c.z;
     }
+    for (var j = 0u; j < 14u; j++) { node_sh[t * 14u + j] = pack2x16float(vec2f(h[2u * j], h[2u * j + 1u])); }
 }
 
 // ---- probe gather --------------------------------------------------------------------------------------------
@@ -1166,6 +1283,10 @@ fn probe_gather(@builtin(global_invocation_id) gid: vec3u) {
     var hn: array<u32, HIT_MAX>;
     var k = 0u;
     let th = PP.theta;
+    // the block's radius keeps a shared 2x2x2 cut conservative for all its probes; a probe that cuts around itself
+    // (terrain, part and volume probes) needs no margin (2026-10-29: on the hill the 3.8 m margin opened every
+    // node near a probe down to its leaves)
+    let brad = select(PP.block_rad, 0.0, (p >= np || PP.dims.w == 1u) && PP.vol_info.y == 0u);   // vol_info.y = 1: ?probemargin=old
     for (var q = 0u; q < U.part_count; q++) {
         if (q == skip) { continue; }
         let xf = parts[q].xf;
@@ -1184,20 +1305,38 @@ fn probe_gather(@builtin(global_invocation_id) gid: vec3u) {
             let e = d - tt * wr;
             if (dot(e, e) > nd.radius * nd.radius) { continue; }
             var use_node = ni < U.gaussian_count;
-            if (!use_node) { use_node = length(cr - nd.mean) - PP.block_rad > th * nd.smax; }
+            if (!use_node) { use_node = length(cr - nd.mean) - brad > th * nd.smax; }
             if (use_node) {
                 let tau = nd.kappa * dirm(nd, wr) * seg_geom(nd, Po, wr, 0.0, t1);
                 if (tau > 1e-6) {
                     let cw = sym_mul(nd.cinv_diag, nd.cinv_off, wr);
-                    let tp = dot(cw, d) / dot(cw, wr);
-                    // insertion into the depth-sorted hit list; when full, the farthest hit is dropped
+                    let den = dot(cw, wr);
+                    let tp = select(t1, clamp(dot(cw, d) / den, 0.0, t1), abs(den) > 1e-30);   // the depth the composite uses
+                    // insertion into the depth-sorted hit list. When full, the farthest hit folds into the last entry
+                    // instead of being dropped: its optical depth adds, the entry's depth becomes the farthest folded in
+                    // (probe_cheb's moments) and its node (light, first_part, backface) stays the nearest one. Dropping
+                    // let a wall behind HIT_MAX faint hits go missing (about 1 probe ray in 20 came out 13% or more too
+                    // open on the marbles); with the fold 16 entries look the same as 24 and the gather is ~1.9 ms
+                    // faster on the M4 (ray-intersect thread, experiments/ray_intersect/probe_proto/m4_fold).
                     var at = min(k, HIT_MAX - 1u);
-                    if (k == HIT_MAX && tp >= ht[HIT_MAX - 1u]) { continue; }
+                    let l = HIT_MAX - 1u;
+                    if (k == HIT_MAX && tp >= ht[l]) {
+                        ht[l] = max(ht[l], tp);
+                        hv[l] = min(hv[l] + tau, 64.0);   // alpha is 1 by then
+                        continue;
+                    }
+                    let full = k == HIT_MAX;
+                    let sv = hv[l];   // the entry about to be evicted
+                    let st = ht[l];
                     while (at > 0u && ht[at - 1u] > tp) {
                         ht[at] = ht[at - 1u]; hv[at] = hv[at - 1u]; hn[at] = hn[at - 1u];
                         at -= 1u;
                     }
                     ht[at] = tp; hv[at] = tau; hn[at] = ni;
+                    if (full) {
+                        ht[l] = max(ht[l], st);
+                        hv[l] = min(hv[l] + sv, 64.0);
+                    }
                     k = min(k + 1u, HIT_MAX);
                 }
             } else {
@@ -1216,10 +1355,9 @@ fn probe_gather(@builtin(global_invocation_id) gid: vec3u) {
     var near = 0.0;
     let bw = sh2_basis(-w);
     for (var i = 0u; i < k; i++) {
+        if (T <= 0.0) { break; }   // opaque: later hits add nothing
         let al = 1.0 - exp(-hv[i]);
-        var v = vec3f(0.0);
-        for (var m = 0u; m < 9u; m++) { v += bw[m] * node_sh[hn[i] * 9u + m].rgb; }
-        acc += T * al * max(v, vec3f(0.0));
+        acc += T * al * max(node_radiance(hn[i], bw), vec3f(0.0));
         let dep = clamp(ht[i], 0.0, t1);
         m1 += T * al * dep;
         m2 += T * al * dep * dep;
@@ -1306,3 +1444,287 @@ fn probe_valid(@builtin(global_invocation_id) gid: vec3u) {
     let r = probe_data[at];
     probe_data[at] = vec4f(r.x, r.y, valid, r.w);
 }
+
+// ---- sender LOD (default since 2026-10-29, ?sendercut=0 off) ---------------------------------------------------
+// probe_gather uses a tree node whole once (distance from its gather centre - block_rad) > theta smax. A node every
+// probe uses whole never needs its leaves' outgoing light: only the nodes the gather can reach do. Per frame, top
+// down by depth, sc_select marks each node of a static part: OPEN (some probe opens it), NODE (the sender cut: every
+// probe uses it whole), BELOW (under the cut or under a cut leaf: never read); leaves under an OPEN parent are LEAF.
+// Movable parts too: the cut follows them, since it is re-selected every frame with the probes where they are now
+// (a part's own probes skip it). Then the cut leaves take the per-leaf
+// path (direct_dirs_emit_sc, env_dirs_sc, node_leaf_list), the cut nodes are lit as one Gaussian each (their record,
+// V grid and iso_norm from lod.js nodeGaussians; sc_shadow's sampled-leaf shadow T; direct_dirs_nodes_sc and
+// env_dirs_nodes_sc into sc_L; node_cut adds the bounce from the probes at the node and writes node_acc), and
+// node_up / node_sh2 run on the OPEN nodes only.
+// sc_list: [0] cut leaves, [1] cut nodes (atomic counts), [2..4] / [5..7] their indirect dispatch sizes, [8] node
+// slots (host, the size of sc_X / 8), [9] (host) 1 in a frame that re-selected the cut, [10] tree slots handed out
+// and [11] tree slots that did not fit (sc_mark), then the leaves at 16 and the
+// nodes at 16 + G. The cut is re-selected only when a part moved (lighting.js); between, the nodes keep their slots,
+// so like the leaves (direct_dirs_emit) their direct light and shadow T refresh a quarter of them a frame.
+
+const SC_BELOW: u32 = 0u;
+const SC_OPEN: u32 = 1u;
+const SC_NODE: u32 = 2u;
+const SC_LEAF: u32 = 3u;
+const SC_SAMPLES: u32 = 8u;   // leaves sc_shadow averages per cut node
+
+@group(0) @binding(35) var<storage, read> node_parent: array<u32>;
+@group(0) @binding(41) var<storage, read_write> env_T: array<vec4f>;
+@group(0) @binding(81) var<storage, read_write> sc_list: array<atomic<u32>>;
+@group(0) @binding(82) var<storage, read> sc_nodes: array<u32>;   // every node by depth (LV: r0 offset, r1 count)
+@group(0) @binding(84) var<storage, read> sc_ro: array<u32>;          // sc_list again, read-only: the passes dispatched from it
+@group(0) @binding(85) var<storage, read_write> sc_X: array<vec4f>;   // per cut node slot x 8: 0-5 each face's SH2 transfer and exposure (sc_xfer)
+
+// the smallest (distance - margin) from world point P to the gather centres of the probes that see part `own`
+// (probe_gather's cen and brad: a room probe's 2x2x2 block centre less the block radius, else the probe itself)
+fn sc_probe_dist(P: vec3f, own: u32) -> f32 {
+    var best = 1e30;
+    let m = select(0.0, PP.block_rad, PP.vol_info.y != 0u);   // probe_gather's margin for probes that cut around themselves
+    if (PP.dims.w == 0u) {
+        let nb = vec3f((PP.dims.xyz + vec3u(1u)) / 2u);
+        let b = clamp(round(((P - PP.lo) / max(PP.step, vec3f(1e-6)) - 0.5) * 0.5), vec3f(0.0), nb - 1.0);
+        best = length(P - (PP.lo + PP.step * (2.0 * b + 0.5))) - PP.block_rad;
+    } else {
+        let ci = vec2i(round((P.xy - PP.lo.xy) / max(PP.step.xy, vec2f(1e-6))));
+        for (var di = -1; di <= 1; di++) {
+            for (var dj = -1; dj <= 1; dj++) {
+                let i = u32(clamp(ci.x + di, 0, i32(PP.dims.x) - 1));
+                let j = u32(clamp(ci.y + dj, 0, i32(PP.dims.y) - 1));
+                let xy = PP.lo.xy + PP.step.xy * vec2f(f32(i), f32(j));
+                let gz = lat_ground(i, j);
+                for (var k = 0u; k < PP.dims.z; k++) { best = min(best, length(P - vec3f(xy, gz + lat_level(k))) - m); }
+            }
+        }
+    }
+    let np = lat_count();
+    for (var q = 0u; q < min(U.part_count, 32u); q++) {
+        if (q == own) { continue; }
+        if (is_part_probe_part(q)) {
+            let pf = part_probe_frame(q);
+            if (length(P - xf_point(parts[q].xf, pf.c)) - length(pf.h) - m >= best) { continue; }
+            for (var k = 0u; k < PART_PROBES_PER; k++) { best = min(best, length(P - probe_pos(np + q * PART_PROBES_PER + k)) - m); }
+        } else if (has_vol(q)) {
+            let vf = vol_frame(q);
+            let d = vec3f(vol_dims(q));
+            let lp = xf_point_inv(parts[q].xf, P);
+            let span = max(d - vec3f(1.0), vec3f(1.0));
+            let ijk = clamp(round((lp - vf.c + vf.h) / max(2.0 * vf.h, vec3f(1e-6)) * span), vec3f(0.0), d - 1.0);
+            best = min(best, length(lp - (vf.c - vf.h + 2.0 * vf.h * ijk / span)) - m);
+        }
+    }
+    return best;
+}
+
+// node n's state, and for every state but BELOW a tree slot (sc_list[10] hands them out; past the arrays' size,
+// counted in sc_list[11] for the host to grow them, the null slot)
+fn sc_mark(n: u32, state: u32) {
+    var t = acc_null();
+    if (state != SC_BELOW) {
+        let s = atomicAdd(&sc_list[10], 1u);
+        if (s < t) { t = s; } else { atomicAdd(&sc_list[11], 1u); }
+    }
+    sc_flag[n] = state | (t << 2u);
+}
+
+@compute @workgroup_size(64)
+fn sc_select(@builtin(global_invocation_id) gid: vec3u) {
+    if (gid.x >= LV.r1) { return; }
+    let n = sc_nodes[LV.r0 + gid.x];
+    let nd = nodes[n];
+    let q = nd.part;
+    if (q >= U.part_count) { sc_mark(n, SC_BELOW); return; }   // scene nodes above the parts: the gather starts at part roots
+    if (parts[q].root != n && (sc_flag[node_parent[n]] & 3u) != SC_OPEN) { sc_mark(n, SC_BELOW); return; }
+    if (n < U.gaussian_count) {
+        sc_mark(n, SC_LEAF);
+        atomicStore(&sc_list[16u + atomicAdd(&sc_list[0], 1u)], n);
+        return;
+    }
+    let P = xf_point(parts[q].xf, nd.mean);
+    if (sc_probe_dist(P, q) <= PP.theta * nd.smax) { sc_mark(n, SC_OPEN); return; }
+    let s = atomicAdd(&sc_list[1], 1u);
+    if (s >= atomicLoad(&sc_list[8])) { sc_mark(n, SC_OPEN); return; }   // out of node slots: its children decide
+    sc_mark(n, SC_NODE);
+    atomicStore(&sc_list[16u + U.gaussian_count + s], n);
+}
+
+@compute @workgroup_size(1)
+fn sc_args() {
+    let nl = atomicLoad(&sc_list[0]);
+    let nn = min(atomicLoad(&sc_list[1]), atomicLoad(&sc_list[8]));
+    atomicStore(&sc_list[1], nn);
+    atomicStore(&sc_list[2], (nl + 63u) / 64u); atomicStore(&sc_list[3], 1u); atomicStore(&sc_list[4], 1u);
+    atomicStore(&sc_list[5], (nn + 63u) / 64u); atomicStore(&sc_list[6], 1u); atomicStore(&sc_list[7], 1u);
+}
+
+fn sc_mass(n: u32) -> f32 {
+    let nd = nodes[n];
+    return nd.kappa / sqrt(max(sym_det(nd.cinv_diag, nd.cinv_off), 1e-30));
+}
+
+// a cut node's shadow T (lamp_state[n], and its distant lights' T at env_T[2 G + n - G]): the mean over
+// SC_SAMPLES leaves under it, each reached by a mass-weighted descent (fixed per node, so it holds still)
+@compute @workgroup_size(64)
+fn sc_shadow(@builtin(global_invocation_id) gid: vec3u) {
+    if (gid.x >= sc_ro[1] || !sc_now(gid.x)) { return; }
+    let n = sc_ro[16u + U.gaussian_count + gid.x];
+    var leaf: array<u32, SC_SAMPLES>;
+    for (var s = 0u; s < SC_SAMPLES; s++) {
+        var m = n;
+        var h = pcg_hash(n * SC_SAMPLES + s);
+        for (var it = 0u; it < 64u && m >= U.gaussian_count; it++) {
+            let nd = nodes[m];
+            var tot = 0.0;
+            for (var j = nd.child_lo; j < nd.child_hi; j++) { tot += sc_mass(kids[j]); }
+            var u = to_unit(h) * tot;
+            h = pcg_hash(h);
+            var pick = kids[nd.child_lo];
+            for (var j = nd.child_lo; j < nd.child_hi; j++) {
+                pick = kids[j];
+                u -= sc_mass(kids[j]);
+                if (u <= 0.0) { break; }
+            }
+            m = pick;
+        }
+        leaf[s] = m;
+    }
+    var keys = array<u32, 4>(0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu);
+    var nk = 0u;
+    for (var s = 0u; s < SC_SAMPLES; s++) {
+        let st = lamp_state[leaf[s]].slots;
+        for (var k = 0u; k < 4u; k++) {
+            let id = st[k].y & 0xFFFFu;
+            if ((st[k].y >> 16u) == 0u || nk >= 4u) { continue; }
+            var seen = false;
+            for (var j = 0u; j < nk; j++) { seen = seen || keys[j] == id; }
+            if (!seen) { keys[nk] = id; nk++; }
+        }
+    }
+    var T = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
+    var E = vec4f(0.0);
+    for (var s = 0u; s < SC_SAMPLES; s++) {
+        let st = lamp_state[leaf[s]].slots;
+        for (var j = 0u; j < nk; j++) {
+            var t = 1.0;
+            var found = false;
+            for (var k = 0u; k < 4u; k++) {
+                if (!found && (st[k].y & 0xFFFFu) == keys[j] && (st[k].y >> 16u) > 0u) { t = bitcast<f32>(st[k].x); found = true; }
+            }
+            if (!found && (st[3].y >> 16u) > 0u && (st[3].y & 0xFFFFu) == 0xFFFFu) { t = bitcast<f32>(st[3].x); }
+            T[j] += t;
+        }
+        E += env_T[leaf[s]];
+    }
+    var out: LampState;
+    for (var j = 0u; j < 4u; j++) {
+        out.slots[j] = select(vec2u(0u, 0u), vec2u(bitcast<u32>(T[j] / f32(SC_SAMPLES)), keys[j] | (1u << 16u)), j < nk);
+    }
+    lamp_state[n] = out;
+    env_T[2u * U.gaussian_count + (n - U.gaussian_count)] = E / f32(SC_SAMPLES);
+}
+
+@compute @workgroup_size(64)
+fn node_leaf_list(@builtin(global_invocation_id) gid: vec3u) {
+    if (gid.x >= sc_ro[0]) { return; }
+    node_leaf_one(sc_ro[16u + gid.x]);
+}
+
+// per cut node slot, when the cut was re-selected (sc_list[9] = 1; the slots keep their nodes until then): each
+// face's share of iso_xfer's SH2 transfer from the node's own V grid (no near field) and its exposure S (iso_init's,
+// split by face); x 6 vec4: face 0 t0-3, t4-7, (t8, S), then face 1
+@compute @workgroup_size(64)
+fn sc_xfer(@builtin(global_invocation_id) gid: vec3u) {
+    let i = gid.x;
+    if (i >= sc_ro[1] || sc_ro[9] == 0u) { return; }
+    let n = sc_ro[16u + U.gaussian_count + i];
+    let G = gaussians[n];
+    let nd = nodes[n];
+    let xf = parts[G.part_surface & 0xFFFFu].xf;
+    let nrm = quat_matrix(G.quat)[0];
+    let s3 = G.scale.x * G.scale.y * G.scale.z;
+    var t: array<f32, 20>;   // face 0: t 0-8, S at 9; face 1 at 10
+    for (var m = 0u; m < 20u; m++) { t[m] = 0.0; }
+    var S0 = 0.0;
+    for (var cc = 0u; cc < NCELL; cc++) {
+        let w = cell_dir(cc);
+        let u = xf_dir_inv(xf, w);
+        let a = footprint(nd, s3 * s3, u) * cell_omega(cc);
+        S0 += a;
+        let v = vgrid_lookup(vgrid[n], u);
+        if (v <= 0.0) { continue; }
+        let h = 0.5 + 0.5 * sc_face(dot(u, nrm));
+        let y = sh2_basis(w);
+        for (var m = 0u; m < 9u; m++) { t[m] += a * v * h * y[m]; t[10u + m] += a * v * (1.0 - h) * y[m]; }
+        t[9] += a * v * h;
+        t[19] += a * v * (1.0 - h);
+    }
+    let Smin = max(0.5 * 0.02 * S0, 1e-30);   // iso_init.wgsl ISO_EPS, per face
+    for (var f = 0u; f < 2u; f++) {
+        let o = 10u * f;
+        sc_X[i * 8u + 3u * f] = vec4f(t[o], t[o + 1u], t[o + 2u], t[o + 3u]);
+        sc_X[i * 8u + 3u * f + 1u] = vec4f(t[o + 4u], t[o + 5u], t[o + 6u], t[o + 7u]);
+        sc_X[i * 8u + 3u * f + 2u] = vec4f(t[o + 8u], max(t[o + 9u], Smin), 0.0, 0.0);
+    }
+}
+
+// a cut node as one sender, a two-sided flake (common.wgsl sc_face): each face of its short axis (its record's first
+// axis) takes the light arriving on its side (direct_dirs_nodes_sc / env_dirs_nodes_sc: sc_X 6 and 7; the
+// probes' SH2 at its centre through sc_xfer's transfer), spread over that face's exposure, and shows it toward each
+// D_k by its share there, weighted like a leaf (node_leaf). One colour for the whole node averaged a wall's lit inner
+// face with its unlit outer one (2026-10-29: cut nodes sent ~4% less on the room, the left wall 9%); a hard split
+// (SC_FACE_K large) overshot by about as much.
+@compute @workgroup_size(64)
+fn node_cut(@builtin(global_invocation_id) gid: vec3u) {
+    let i = gid.x;
+    if (i >= sc_ro[1]) { return; }
+    let n = sc_ro[16u + U.gaussian_count + i];
+    let G = gaussians[n];
+    let nd = nodes[n];
+    let own = G.part_surface & 0xFFFFu;
+    let xf = parts[own].xf;
+    let P = xf_point(xf, G.mu);
+    let nrm = quat_matrix(G.quat)[0];
+    let s3 = G.scale.x * G.scale.y * G.scale.z;
+    let pw = probe_weights(P, own);
+    var Lsh: array<vec3f, 9>;
+    for (var m = 0u; m < 9u; m++) { Lsh[m] = vec3f(0.0); }
+    for (var k = 0u; k < 8u; k++) {
+        let w = pw.w[k];
+        if (w <= 0.0) { continue; }
+        for (var m = 0u; m < 9u; m++) { Lsh[m] += w * probe_sh[pw.pid[k] * 9u + m].rgb; }
+    }
+    var col: array<vec3f, 2>;
+    for (var f = 0u; f < 2u; f++) {
+        let a = sc_X[i * 8u + 3u * f]; let b = sc_X[i * 8u + 3u * f + 1u]; let c = sc_X[i * 8u + 3u * f + 2u];
+        let B = a.x * Lsh[0] + a.y * Lsh[1] + a.z * Lsh[2] + a.w * Lsh[3] + b.x * Lsh[4] + b.y * Lsh[5]
+              + b.z * Lsh[6] + b.w * Lsh[7] + c.x * Lsh[8];
+        col[f] = G.albedo * max(sc_X[i * 8u + 6u + f].rgb + max(B, vec3f(0.0)), vec3f(0.0)) / c.y;   // 6-7: the direct light (sc_L)
+    }
+    let dark = PP.refl.w != 0u && own == PP.refl.w - 1u;
+    let t = tree_slot(n);
+    if (t >= acc_null()) { return; }
+    for (var k = 0u; k < 14u; k++) {
+        let wo = xf_dir_inv(xf, PP.dirs[k].xyz);
+        let w = footprint(nd, s3 * s3, wo) * vgrid_lookup(vgrid[n], wo);
+        let h = 0.5 + 0.5 * sc_face(dot(wo, nrm));
+        let L = select(col[0] * h + col[1] * (1.0 - h), vec3f(0.0), dark);
+        node_acc[t * 14u + k] = vec4f(L * w, w);
+    }
+}
+
+@compute @workgroup_size(64)
+fn node_up_sc(@builtin(global_invocation_id) gid: vec3u) {
+    if (gid.x >= LV.r1) { return; }
+    let i = up_nodes[LV.r0 + gid.x];
+    if ((sc_flag[i] & 3u) != SC_OPEN) { return; }
+    node_up_one(i);
+}
+
+@compute @workgroup_size(64)
+fn node_sh2_sc(@builtin(global_invocation_id) gid: vec3u) {
+    if (gid.x >= PP.node_count || (sc_flag[gid.x] & 3u) == SC_BELOW) { return; }
+    node_sh2_one(gid.x);
+}
+
+// a cut node slot refreshes its direct light and shadow T this frame (sc_shadow, direct_dirs_nodes_sc,
+// env_dirs_nodes_sc): every slot when the cut was re-selected, else a quarter a frame as direct_dirs_emit does
+fn sc_now(i: u32) -> bool { return sc_ro[9] != 0u || (U.iso & 2u) == 0u || i % 4u == U.frame % 4u; }

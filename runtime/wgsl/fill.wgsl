@@ -23,10 +23,10 @@ fn display_fill(@builtin(global_invocation_id) gid: vec3u) {
         let o = F.G + 1u + 2u * k;
         let j = fill[o]; let w = bitcast<f32>(fill[o + 1u]);
         c += w * colour[j].rgb;
-        b += w * lo_b[j * 15u + 14u].rgb;
+        b += w * lo_b[j * LOB + LOB_EYE].rgb;
     }
     colour[g] = vec4f(c, colour[g].w);
-    lo_b[g * 15u + 14u] = vec4f(b, lo_b[g * 15u + 14u].w);
+    lo_b[g * LOB + LOB_EYE] = vec4f(b, 0.0);
 }
 
 // ?lodlight=2 (lod.wgsl lod_list): a drawn leaf's fill sources must be shaded this frame too, though they may sit

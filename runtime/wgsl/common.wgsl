@@ -46,6 +46,16 @@ struct FrameUniforms {       // SPEC 3.1, 64 B
                              // bit 2 (with bit 0): P3 ASG, probe cells as shapes toward the eye (bounce_dirs)
 }
 
+// Per-Gaussian outgoing light for the bounce (bounce.wgsl; 2026-10-30, GPU-memory cut): lo_dir holds one vec4 per
+// Gaussian, its direct light toward the probes (one colour for every direction, M39; a shiny one's mean over the 14
+// fixed directions), and lo_b LOB vec4s: the bounce toward the eye (rgb), the bounce toward the probes (rgb, as
+// lo_dir), and the eye's specular lanes (rgb: reflection coverage's specular bounce, or Fresnel's probe sheen).
+// Was 14 + 15 vec4s per Gaussian, one per direction.
+const LOB: u32 = 3u;
+const LOB_EYE: u32 = 0u;
+const LOB_SEND: u32 = 1u;
+const LOB_LANES: u32 = 2u;
+
 struct Material {            // SPEC 2.6, 32 B
     flake: vec3f,            // SGGX S diagonal in the Gaussian's own frame (x = short axis)
     phase_samples: u32,      // 0 = flat-flake closed form; else fixed VNDF samples
@@ -327,3 +337,9 @@ fn window(L: Lamp, d: f32) -> f32 {
     let x = clamp(1.0 - pow(d / L.range, 4.0), 0.0, 1.0);
     return x * x;
 }
+
+// Sender LOD (bounce.wgsl node_cut): a cut node is a two-sided flake about its short axis n. A direction w at
+// cos = w.n is shared between the faces, face + taking (1 + sc_face(cos)) / 2: SC_FACE_K 1 a linear blend (a blob),
+// large a hard split (a thin sheet: a wall's inner and outer faces).
+const SC_FACE_K: f32 = 1.0;
+fn sc_face(c: f32) -> f32 { return clamp(c * SC_FACE_K, -1.0, 1.0); }

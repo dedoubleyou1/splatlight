@@ -37,6 +37,7 @@ struct Splat {
 const NUM_BUCKETS: u32 = 65536u;   // one 16-bit depth key
 const INVALID_KEY: u32 = 0xffffffffu;
 const MAX_PARTS: u32 = 32u;
+const PART_HIDDEN: u32 = 4u;   // Part.flags bit 2 (SPEC 2.4): hidden, not drawn
 const EMITTER_MATERIAL: u32 = 254u;  // emissive Gaussians (runtime/wgsl/emissive.wgsl)
 
 // Renderer-only per-frame uniform (the lighting kernels' FrameUniforms is SPEC §3.1).
@@ -63,6 +64,16 @@ struct RenderFrame {
   part_material_ext: array<vec4u, 4>,   // palette slot per part, parts 16-31
   lod: vec4u,                       // screen-space LOD: threshold px (f32 bits, 0 = off), node splat base, internal nodes
                                     // (u32: f32 bits of small ints are denormals, which the GPU may flush)
+  explode: vec4f,                   // Explode button (project.wgsl): flight time s, reassembly 0-1, and the previous
+                                    // frame's two (motion blur)
+  explode_c: vec4f,                 // burst centre xyz, floor z
+  explode_k: vec4f,                 // speed m/s, gravity m/s^2, on (> 0.5; 0 = off), unused
+  mat_view_ext: array<vec4f, 16>,   // mat_view for materials 16-31 (cornell_sdf_fx's ice is 16, the jellyfish bell 19)
+  tone: vec4u,                      // x: display tone curve (display.wgsl: 0 clamp, 1 AgX, 2 ACES fit, 3 Reinhard on luminance)
+  part_fade: array<vec4f, 8>,       // per part (0-31), draw time only: 0 shown (the default), 1 gone; project.wgsl scales the
+                                    // splat's optical depth by 1 - fade (drifting clouds wrapping round, main.js cloudPose)
+  particles: vec4u,                 // Gaussian particles (src/particles.js): x = first splat slot (0 = none), y = count,
+                                    // z = their first index in the gaussians buffer
 }
 
 const REFL_SPLIT: u32 = 1u;     // RenderFrame.lamp_color.w bits (u32(w + 0.5))

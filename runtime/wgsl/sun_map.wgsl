@@ -14,17 +14,25 @@
 //   sm_lookup   one thread per receiver: blocker depth at a coarse level, then the level whose texel matches the
 //               penumbra sigma (z - z_b), T_m = 1 - alpha Phi((z - mu) / sd); env_T[g] = static T x prod T_m
 // Layer l = m x K + k: movable part m (SM.movable[m]), light k (K = SM.n_lights).
+//
+// Every part (2026-10-29, David: one-frame shadows when the sun moves too): the walk is gone (?sunmap=0 brings it
+// back). Each part and light gets layers (sun_map.js desc): small parts one map fitted to their bound; large ones (the
+// hill's ground and grass) cascades centred ahead of the camera (8 m and 32 m half sizes, re-centred when the camera
+// moves a quarter of one) plus a map of the whole part. A receiver uses, per other part and light, the finest of that
+// part's layers it lies inside; env_T[g] = prod T. Static layers re-splat only when the sun moves or a cascade moves.
 
 struct SunParams {
     n_layers: u32, res: u32, levels: u32, layer_texels: u32,
     n_lights: u32, n_movable: u32, dirty: u32, range_count: u32,   // dirty: bit l = re-splat layer l this frame
     margin: f32, shutter: f32, cut_k: f32, node_count: u32,       // margin (m) for penumbrae past the part; blur cut
     lights: array<vec4f, 4>,          // xyz unit direction toward the light (world), w angular std (rad); w < 0: no shadows
-    movable: array<vec4u, 4>,         // movable part index by m (16 max)
+    part_layers: array<vec4u, 16>,    // per part p (32 max): (first layer, layer count) at [p / 2].xy or .zw
     level_off: array<vec4u, 4>,       // first texel of each mip level within a layer
 }
 struct SunLayer { c: vec2f, half: f32, zref: f32, t1: vec3f, part: u32, t2: vec3f, light: u32 }
 struct SunLevel { level: u32, res: u32, pad0: u32, pad1: u32 }
+// per layer (sun_map.js): kind 0 fitted to the part's bound, 1 a cascade at (c, half) given by the host; dirty: re-splat
+struct LayerDesc { part: u32, light: u32, kind: u32, dirty: u32, c: vec2f, half: f32, pad: f32 }
 
 @group(0) @binding(0) var<uniform> U: FrameUniforms;
 @group(0) @binding(1) var<storage, read> gaussians: array<Gaussian>;   // motion-blur copies (stretched while moving)
@@ -40,16 +48,17 @@ struct SunLevel { level: u32, res: u32, pad0: u32, pad1: u32 }
 @group(0) @binding(63) var<storage, read_write> mip: array<vec4f>;         // [layer][level texels] (a, a mu, a m2, 0)
 @group(0) @binding(64) var<storage, read> ranges: array<vec4u>;            // (first, end, thread offset, m)
 @group(0) @binding(65) var<uniform> LV: SunLevel;
+@group(0) @binding(66) var<storage, read> desc: array<LayerDesc>;
 
 const SM_FIX: f32 = 4096.0;           // fixed point: tau <= 64 and depth^2 up to ~1e4 m^2 stay in u32
 const SM_MAX_HALF: i32 = 32;
 const SM_LOWPASS: f32 = 0.3;
 const SM_NONE: u32 = 0xFFFFFFFFu;
 
-fn movable_part(m: u32) -> u32 { return SM.movable[m / 4u][m % 4u]; }
+fn part_range(p: u32) -> vec2u { let v = SM.part_layers[p / 2u]; return select(v.xy, v.zw, (p & 1u) == 1u); }
 fn sm_level_off(k: u32) -> u32 { return SM.level_off[k / 4u][k % 4u]; }
 fn sm_texels() -> u32 { return SM.res * SM.res; }
-fn layer_dirty(l: u32) -> bool { return (SM.dirty & (1u << l)) != 0u; }
+fn layer_dirty(l: u32) -> bool { return desc[l].dirty != 0u; }
 
 fn sym3s(dg: vec3f, off: vec3f) -> mat3x3f {
     return mat3x3f(vec3f(dg.x, off.x, off.y), vec3f(off.x, dg.y, off.z), vec3f(off.y, off.z, dg.z));
@@ -83,20 +92,23 @@ fn rec_cov(i: u32, R: mat3x3f, rest: bool) -> mat3x3f {
 fn sm_frame(@builtin(global_invocation_id) gid: vec3u) {
     let l = gid.x;
     if (l >= SM.n_layers) { return; }
-    let m = l / SM.n_lights;
-    let k = l - m * SM.n_lights;
-    let p = movable_part(m);
+    let d = desc[l];
+    let p = d.part;
+    let k = d.light;
     let L = SM.lights[k].xyz;
     let t1 = basis_k(L);
     let t2 = cross(L, t1);
     let b = parts[p].bound;
     let c = xf_point(parts[p].xf, b.xyz);
-    layers[l] = SunLayer(vec2f(dot(c, t1), dot(c, t2)), b.w + SM.margin, dot(c, L) + b.w, t1, p, t2, k);
+    var cc = vec2f(dot(c, t1), dot(c, t2));
+    var half = b.w + SM.margin;
+    if (d.kind == 1u) { cc = d.c; half = d.half; }
+    layers[l] = SunLayer(cc, half, dot(c, L) + b.w, t1, p, t2, k);
 }
 
 @compute @workgroup_size(64)
-fn sm_clear(@builtin(global_invocation_id) gid: vec3u) {
-    let i = gid.x;
+fn sm_clear(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
+    let i = gid.y * nw.x * 64u + gid.x;   // 2D: layers x texels can pass 65535 x 64 threads
     let n = sm_texels() * 3u;
     if (i >= n * SM.n_layers || !layer_dirty(i / n)) { return; }
     atomicStore(&acc[i], 0u);
@@ -121,7 +133,7 @@ fn sm_splat(@builtin(global_invocation_id) gid: vec3u) {
         if (gid.x >= R.z && gid.x < R.z + (R.y - R.x)) { g = R.x + (gid.x - R.z); m = R.w; break; }
     }
     if (g == SM_NONE) { return; }
-    let p = movable_part(m);
+    let p = m;   // ranges carry the part
     let leaf = g < U.gaussian_count;
     let L = sm_smear(p);
     var cover = false;
@@ -133,9 +145,10 @@ fn sm_splat(@builtin(global_invocation_id) gid: vec3u) {
         if (g != parts[p].root && par != SM_NONE && nodes_rest[par].radius <= thr) { return; }
         cover = true;
     } else if (!leaf) { return; }
-    for (var k = 0u; k < SM.n_lights; k++) {
-        let l = m * SM.n_lights + k;
-        if (layer_dirty(l) && SM.lights[k].w >= 0.0) { sm_splat_one(g, p, l, cover); }
+    if (p >= 32u) { return; }
+    let pl = part_range(p);
+    for (var l = pl.x; l < pl.x + pl.y; l++) {
+        if (layer_dirty(l) && SM.lights[desc[l].light].w >= 0.0) { sm_splat_one(g, p, l, cover); }
     }
 }
 
@@ -213,8 +226,8 @@ fn inverse2(m: mat2x2f) -> mat2x2f {
 // ---- resolve and mips -----------------------------------------------------------------------------------------
 
 @compute @workgroup_size(64)
-fn sm_resolve(@builtin(global_invocation_id) gid: vec3u) {
-    let i = gid.x;
+fn sm_resolve(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
+    let i = gid.y * nw.x * 64u + gid.x;   // 2D: layers x texels can pass 65535 x 64 threads
     let n = sm_texels();
     if (i >= n * SM.n_layers) { return; }
     let l = i / n;
@@ -229,8 +242,8 @@ fn sm_resolve(@builtin(global_invocation_id) gid: vec3u) {
 }
 
 @compute @workgroup_size(64)
-fn sm_down(@builtin(global_invocation_id) gid: vec3u) {
-    let i = gid.x;
+fn sm_down(@builtin(global_invocation_id) gid: vec3u, @builtin(num_workgroups) nw: vec3u) {
+    let i = gid.y * nw.x * 64u + gid.x;   // 2D: layers x texels can pass 65535 x 64 threads
     let n = LV.res * LV.res;
     if (i >= n * SM.n_layers) { return; }
     let l = i / n;
@@ -280,12 +293,17 @@ fn sm_lookup(@builtin(global_invocation_id) gid: vec3u) {
     let own = G.part_surface & 0xFFFFu;
     let P = xf_point(parts[own].xf, G.mu);
     var T = vec4f(1.0);
+    var used = SM_NONE;                                   // (part, light) already looked up in a finer layer
     for (var l = 0u; l < SM.n_layers; l++) {
         let ly = layers[l];
-        if (ly.part == own || SM.lights[ly.light].w < 0.0) { continue; }
+        let key = ly.part * 8u + ly.light;
+        if (ly.part == own || key == used || SM.lights[ly.light].w < 0.0) { continue; }
         let w = SM.lights[ly.light].xyz;
         let uv = vec2f(dot(P, ly.t1), dot(P, ly.t2)) - ly.c;
-        if (any(abs(uv) >= vec2f(ly.half))) { continue; }
+        // a cascade serves receivers in its inner 90% (its filter footprint stays inside); fitted layers all of it
+        let inner = select(1.0, 0.9, desc[l].kind == 1u) * ly.half;
+        if (any(abs(uv) >= vec2f(inner))) { continue; }
+        used = key;
         let z = ly.zref - dot(P, w);
         if (z <= 0.0) { continue; }                        // above the part's top: nothing of it lies sunward
         let texel = 2.0 * ly.half / f32(SM.res);
@@ -302,5 +320,5 @@ fn sm_lookup(@builtin(global_invocation_id) gid: vec3u) {
         let sd = sqrt(max(s.z / s.x - mu * mu, 1e-8));
         T[ly.light] *= 1.0 - s.x * sm_phi((z - mu) / sd);
     }
-    env_T[g] = env_T[n + g] * T;
+    env_T[g] = T;
 }

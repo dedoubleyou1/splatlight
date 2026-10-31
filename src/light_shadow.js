@@ -1,13 +1,9 @@
-// Light-side deterministic shadows (runtime/wgsl/light_shadow.wgsl), in place of walk_emit + ema (A is the renderer's
-// default since 2026-10-25, David; main.js `shadowMethod`):
-//   'map'  A: per-part opacity map splatted from the light (lsm_splat -> lsm_resolve -> lsm_down per level -> lsm_lookup)
-//   'lobe' B: Gaussian-lobe light map (lobe_clear -> lobe_cut -> lobe_lookup)
-//   'slice' C: B simplified: one cut per receiver-distance slice, lobes evaluated in the light's direction space, bins
-//          per (slice, tile, part) compacted (lc_clear -> lc_cut -> lc_scan -> lc_scatter -> lc_lookup)
-// Both write the other-part transmittance into lamp_state slot 0 every frame, with no history, so shade_emit and the
-// bounce read it unchanged. A re-splats only the layers of parts that moved (all of them when the light changed);
-// B and C rebuild their cuts when anything moved. All three are deterministic, so with nothing moved the lookup is
-// skipped and lamp_state keeps last frame's T. Mirrors renderer/tools/light_shadow.py (the native harness).
+// The emitter light's shadows (runtime/wgsl/light_shadow.wgsl): a per-part opacity map splatted from the light
+// (lsm_splat -> lsm_resolve -> lsm_down per level -> lsm_lookup), "A", the renderer's only method since 2026-10-29
+// (David archived the sampled walk and the B lobe / C slice options; their WGSL stays for the native tools,
+// renderer/tools/light_shadow.py). It writes the other-part transmittance into lamp_state slot 0, with no history, so
+// shade_emit and the bounce read it unchanged. Only the layers of parts that moved re-splat (all of them when the
+// light changed); deterministic, so with nothing moved the lookup is skipped and lamp_state keeps last frame's T.
 
 const WG = 64;
 const B = GPUBufferUsage;
@@ -17,18 +13,8 @@ const BINDS = {
   lsm_resolve: [40, 41, 42],
   lsm_down: [40, 42, 46],
   lsm_lookup: [0, 1, 4, 6, 40, 42],
-  lobe_clear: [40, 44],
-  lobe_cut: [0, 1, 2, 4, 35, 40, 43, 44, 45],
-  lobe_lookup: [0, 1, 2, 4, 6, 9, 40, 43, 44, 45],
-  lc_clear: [40, 48],
-  lc_cut: [0, 1, 2, 4, 35, 40, 47, 48],
-  lc_scan: [40, 48, 49, 50],
-  lc_scatter: [40, 47, 48, 50, 51],
-  lc_lookup: [0, 1, 4, 6, 40, 47, 48, 49, 51],
 };
-// C: lobes, bin items (compacted), lobes evaluated per receiver at most
-const OPT_C = { maxLobes: 1 << 19, items: 1 << 23, budget: 4096 };
-// light_shadow.py defaults (cut 0.25 rad, refine 8, unwidened flat tops summed per part; 512 map)
+// light_shadow.py defaults (512 map); the lobe fields of LSParams keep their values for the shared struct
 const OPT = { res: 512, tiles: 32, tileCap: 1024, cutTheta: 0.25, refine: 8, budget: 256, maxLobes: 1 << 17, slices: 10, d0: 0.25, d1: 3.5, combine: 2 };
 
 // Per part, the mean number of its surfaces a straight line crosses (light_shadow.py part_layers): centres binned
@@ -71,28 +57,17 @@ export class LightShadow {
     this.device = device;
     this.lighting = lighting;
     this.asset = asset;
-    this.method = null;           // null = today's walk
     this.module = device.createShaderModule({ label: 'light_shadow', code: sources.common + '\n' + sources.light_shadow });
     this.layers = partLayers(new Float32Array(asset.gaussians), asset.header.parts);
-    this.ready = {};
     this.dirtyAll = true;
+    this.init();
   }
 
-  // null, 'map' or 'lobe'; buffers and pipelines are made on first use
-  setMethod(m) {
-    if (m === this.method) return;
-    this.method = m;
-    this.dirtyAll = true;
-    if (m && !this.ready[m]) this.init(m);
-  }
-
-  init(m) {
+  init() {
     const d = this.device, L = this.lighting, P = L.partCount;
     const buf = (label, size, usage = B.STORAGE) => d.createBuffer({ label, size: Math.max(16, size), usage: usage | B.COPY_DST | B.COPY_SRC });
-    if (!this.params) {
-      this.params = buf('light shadow params', 336, B.UNIFORM);
-      this.ls = new ArrayBuffer(336);
-    }
+    this.params = buf('light shadow params', 336, B.UNIFORM);
+    this.ls = new ArrayBuffer(336);
     const res = {
       0: L.buffers.uniform, 1: L.buffers.gaussians, 2: L.buffers.nodes, 4: L.buffers.parts, 6: L.buffers.lamp_state,
       9: L.buffers.kids, 35: L.buffers.node_parent, 40: this.params,
@@ -111,41 +86,22 @@ export class LightShadow {
       return { pipe: p, groups: groups.map(g => d.createBindGroup({ layout: p.getBindGroupLayout(0),
         entries: BINDS[entry].map(b => ({ binding: b, resource: { buffer: g[b] ?? res[b] } })) })) };
     };
-    if (m === 'map') {
-      let r = OPT.res;
-      while (r > 64 && Math.ceil(P * r * r / WG) > 65535) r >>= 1;   // one dispatch over every layer's texels
-      this.res = r;
-      this.levels = [];
-      let off = 0;
-      for (let k = r; k >= 1; k >>= 1) { this.levels.push([off, k]); off += k * k; }
-      this.layerTexels = off;
-      this.acc = buf('light shadow map (fixed point)', P * r * r * 12);
-      this.mip = buf('light shadow map mips', P * off * 16);
-      this.lv = this.levels.map(([, rk], k) => { const b = buf(`light shadow level ${k}`, 16, B.UNIFORM); d.queue.writeBuffer(b, 0, new Uint32Array([k, rk, 0, 0])); return b; });
-      Object.assign(res, { 41: this.acc, 42: this.mip });
-      this.map = {
-        // motion blur (lighting.js): moving parts splat their stretched records
-        lsm_splat: pipe('lsm_splat', [L.blur ? { 1: L.buffers.gaussians_blur, 2: L.buffers.nodes_blur } : {}]), lsm_resolve: pipe('lsm_resolve', [{}]),
-        lsm_down: pipe('lsm_down', this.lv.map(b => ({ 46: b }))), lsm_lookup: pipe('lsm_lookup', [{}]),
-      };
-    } else if (m === 'slice') {
-      const nb = OPT.slices * OPT.tiles * OPT.tiles * P;
-      this.nbins = nb;
-      Object.assign(res, {
-        47: buf('light-space lobes', OPT_C.maxLobes * 80), 48: buf('light-space bin counts', (nb + 2) * 4),
-        49: buf('light-space bin starts', nb * 4), 50: buf('light-space bin cursors', nb * 4),
-        51: buf('light-space bin items', OPT_C.items * 4),
-      });
-      this.slice = Object.fromEntries(['lc_clear', 'lc_cut', 'lc_scan', 'lc_scatter', 'lc_lookup'].map(e => [e, pipe(e, [{}])]));
-    } else {
-      const bins = OPT.slices * OPT.tiles * OPT.tiles;
-      this.lobes = buf('light lobes', OPT.maxLobes * 64);
-      this.tileCount = buf('light lobe bins', (bins + 1) * 4);
-      this.tileItems = buf('light lobe bin items', bins * OPT.tileCap * 4);
-      Object.assign(res, { 43: this.lobes, 44: this.tileCount, 45: this.tileItems });
-      this.lobe = { lobe_clear: pipe('lobe_clear', [{}]), lobe_cut: pipe('lobe_cut', [{}]), lobe_lookup: pipe('lobe_lookup', [{}]) };
-    }
-    this.ready[m] = true;
+    let r = OPT.res;
+    while (r > 64 && Math.ceil(P * r * r / WG) > 65535) r >>= 1;   // one dispatch over every layer's texels
+    this.res = r;
+    this.levels = [];
+    let off = 0;
+    for (let k = r; k >= 1; k >>= 1) { this.levels.push([off, k]); off += k * k; }
+    this.layerTexels = off;
+    this.acc = buf('light shadow map (fixed point)', P * r * r * 12);
+    this.mip = buf('light shadow map mips', P * off * 16);
+    this.lv = this.levels.map(([, rk], k) => { const b = buf(`light shadow level ${k}`, 16, B.UNIFORM); d.queue.writeBuffer(b, 0, new Uint32Array([k, rk, 0, 0])); return b; });
+    Object.assign(res, { 41: this.acc, 42: this.mip });
+    this.map = {
+      // motion blur (lighting.js): moving parts splat their stretched records
+      lsm_splat: pipe('lsm_splat', [L.blur ? { 1: L.buffers.gaussians_blur, 2: L.buffers.nodes_blur } : {}]), lsm_resolve: pipe('lsm_resolve', [{}]),
+      lsm_down: pipe('lsm_down', this.lv.map(b => ({ 46: b }))), lsm_lookup: pipe('lsm_lookup', [{}]),
+    };
   }
 
   // The light as one point and an isotropic spread: the emitter tree root's mean and its ASG covariance (lighting.js
@@ -173,10 +129,9 @@ export class LightShadow {
     f.set(t1, 8); u[11] = this.layerTexels ?? 0;
     f.set(t2, 12); u[15] = dirty;
     f[16] = sigma; u[17] = e.skipPart; u[18] = e.oneSided ? 1 : 0; u[19] = L.partCount;
-    const C = this.method === 'slice';
-    f[20] = OPT.cutTheta; u[21] = OPT.tiles; u[22] = C ? OPT_C.items : OPT.tileCap; f[23] = OPT.refine;
-    f.set([c[0], c[1], c[2]], 24); u[27] = C ? OPT_C.maxLobes : OPT.maxLobes;
-    f.set([c[4], c[5], c[6]], 28); u[31] = C ? OPT_C.budget : OPT.budget;
+    f[20] = OPT.cutTheta; u[21] = OPT.tiles; u[22] = OPT.tileCap; f[23] = OPT.refine;
+    f.set([c[0], c[1], c[2]], 24); u[27] = OPT.maxLobes;
+    f.set([c[4], c[5], c[6]], 28); u[31] = OPT.budget;
     u[32] = OPT.slices; f[33] = OPT.d0; f[34] = Math.log(OPT.d1 / OPT.d0) / OPT.slices; u[35] = OPT.combine;
     (this.levels ?? []).forEach(([o], k) => { u[36 + k] = o; });
     f.set(this.layers, 52);
@@ -184,7 +139,7 @@ export class LightShadow {
     return true;
   }
 
-  // In place of shadow_cull + walk_emit + ema. movedMask: bit p = part p moved this frame.
+  // movedMask: bit p = part p moved this frame. Returns false while there is no emitter light yet.
   encode(encoder, timers, movedMask, changed) {
     const L = this.lighting, P = L.partCount;
     const run = (p, entry, threads, k = 0, timer) => {
@@ -195,36 +150,16 @@ export class LightShadow {
     };
     // deterministic: with nothing moved, last frame's T in lamp_state is still right
     const look = this.dirtyAll || changed || movedMask !== 0;
-    if (this.method === 'map') {
-      const dirty = this.dirtyAll ? (2 ** P - 1) : movedMask;
-      if (!this.writeParams(dirty >>> 0)) return false;
-      if (dirty) {
-        const n = this.res * this.res * 12;
-        for (let p = 0; p < P; p++) if ((dirty >>> p) & 1) encoder.clearBuffer(this.acc, p * n, n);
-        run(this.map, 'lsm_splat', this.blurCut > 0 ? L.nodeCount : L.count);   // ?blurcut: tree nodes too
-        run(this.map, 'lsm_resolve', P * this.res * this.res);
-        for (let k = 1; k < this.levels.length; k++) run(this.map, 'lsm_down', P * this.levels[k][1] ** 2, k);
-      }
-      if (look) run(this.map, 'lsm_lookup', L.count, 0, 'walk_lamp');
-    } else if (this.method === 'slice') {
-      if (!this.writeParams(0)) return false;
-      if (look) {
-        run(this.slice, 'lc_clear', this.nbins + 2);
-        run(this.slice, 'lc_cut', L.nodeCount * OPT.slices);
-        const pass = encoder.beginComputePass({ label: 'lc_scan' });
-        pass.setPipeline(this.slice.lc_scan.pipe); pass.setBindGroup(0, this.slice.lc_scan.groups[0]);
-        pass.dispatchWorkgroups(1); pass.end();
-        run(this.slice, 'lc_scatter', OPT_C.maxLobes);
-        run(this.slice, 'lc_lookup', L.count, 0, 'walk_lamp');
-      }
-    } else {
-      if (!this.writeParams(0)) return false;
-      if (this.dirtyAll || changed) {
-        run(this.lobe, 'lobe_clear', OPT.slices * OPT.tiles * OPT.tiles + 1);
-        run(this.lobe, 'lobe_cut', L.nodeCount);
-      }
-      if (look) run(this.lobe, 'lobe_lookup', L.count, 0, 'walk_lamp');
+    const dirty = this.dirtyAll ? (2 ** P - 1) : movedMask;
+    if (!this.writeParams(dirty >>> 0)) return false;
+    if (dirty) {
+      const n = this.res * this.res * 12;
+      for (let p = 0; p < P; p++) if ((dirty >>> p) & 1) encoder.clearBuffer(this.acc, p * n, n);
+      run(this.map, 'lsm_splat', this.blurCut > 0 ? L.nodeCount : L.count);   // ?blurcut: tree nodes too
+      run(this.map, 'lsm_resolve', P * this.res * this.res);
+      for (let k = 1; k < this.levels.length; k++) run(this.map, 'lsm_down', P * this.levels[k][1] ** 2, k);
     }
+    if (look) run(this.map, 'lsm_lookup', L.count, 0, 'shadow');
     this.dirtyAll = false;
     return true;
   }

@@ -5,7 +5,7 @@
  "buffers": {
   "gaussians": {
    "file": "gaussians.bin",
-   "count": 78148,
+   "count": 89741,
    "stride": 64,
    "fields": {
     "mu": {
@@ -40,7 +40,7 @@
   },
   "nodes": {
    "file": "nodes.bin",
-   "count": 156289,
+   "count": 179475,
    "stride": 96,
    "fields": {
     "mean": {
@@ -95,7 +95,7 @@
   },
   "kids": {
    "file": "kids.bin",
-   "count": 156288,
+   "count": 179474,
    "stride": 4,
    "fields": {
     "child": {
@@ -106,7 +106,7 @@
   },
   "vgrid": {
    "file": "vgrid.bin",
-   "count": 78148,
+   "count": 89741,
    "stride": 128,
    "fields": {
     "v": {
@@ -230,8 +230,8 @@
   }
  },
  "name": "cornell_sdf_room_plain_bin",
- "gaussian_count": 78148,
- "node_count": 156289,
+ "gaussian_count": 89741,
+ "node_count": 179475,
  "part_count": 8,
  "lamp_count": 1,
  "frame": "right-handed, z up, metres (protocol v0.4)",
@@ -239,7 +239,7 @@
   {
    "index": 0,
    "name": "floor",
-   "root": 87840,
+   "root": 99433,
    "gaussians": [
     0,
     9694
@@ -250,7 +250,7 @@
   {
    "index": 1,
    "name": "ceiling",
-   "root": 97315,
+   "root": 108908,
    "gaussians": [
     9694,
     19170
@@ -261,7 +261,7 @@
   {
    "index": 2,
    "name": "back",
-   "root": 104173,
+   "root": 115766,
    "gaussians": [
     19170,
     26029
@@ -272,7 +272,7 @@
   {
    "index": 3,
    "name": "left_red",
-   "root": 113549,
+   "root": 125142,
    "gaussians": [
     26029,
     35406
@@ -283,7 +283,7 @@
   {
    "index": 4,
    "name": "right_green",
-   "root": 122949,
+   "root": 134542,
    "gaussians": [
     35406,
     44807
@@ -294,10 +294,10 @@
   {
    "index": 5,
    "name": "short_box",
-   "root": 135493,
+   "root": 152813,
    "gaussians": [
     44807,
-    57352
+    63079
    ],
    "static": false,
    "rig_name": "short_box",
@@ -311,10 +311,10 @@
   {
    "index": 6,
    "name": "tall_box",
-   "root": 155968,
+   "root": 179154,
    "gaussians": [
-    57352,
-    77828
+    63079,
+    89421
    ],
    "static": false,
    "rig_name": "tall_box",
@@ -328,16 +328,16 @@
   {
    "index": 7,
    "name": "lamp",
-   "root": 156287,
+   "root": 179473,
    "gaussians": [
-    77828,
-    78148
+    89421,
+    89741
    ],
    "static": true,
    "rig_name": null
   }
  ],
- "scene_root": 156288,
+ "scene_root": 179474,
  "lamps": [
   {
    "name": "cornell_ceiling",
@@ -391,7 +391,7 @@
   "theta": 8.0,
   "stack": 64,
   "max_fanout": 2,
-  "max_depth": 24
+  "max_depth": 28
  },
  "vgrid": {
   "rows": 8,
@@ -411,11 +411,7 @@
    "rule": "M36 surf.bake rule 0 (light-space), 64 points",
    "kernel": "experiments/M37_sdf_splats/gpu_bake/bake_v.wgsl",
    "adapter": "Apple M4",
-   "seconds": 117.7
-  },
-  "translucency_bake_gaussians": {
-   "count": 40281,
-   "k": 1.0
+   "seconds": 167.51
   }
  },
  "provenance": {
@@ -464,6 +460,7 @@
   "z": 1.93568
  },
  "sdf_room": {
+  "box_bottom": true,
   "wall_mode": "extended",
   "wall_ext": 0.02,
   "r_room": 0.005,
@@ -477,13 +474,14 @@
    "back": 6859,
    "left_red": 9377,
    "right_green": 9401,
-   "short_box": 12545,
-   "tall_box": 20476
+   "short_box": 18272,
+   "tall_box": 26342
   }
  },
+ "note": "SDF room with closed boxes (room.py BOX_BOTTOM, 2026-10-29): boxes stand on the floor with a full bottom face; built as cornell_sdf_room_closed (room.py export, GPU V) and ported by scripts/port_sdf_scene.sh. The previous open-bottom asset is cornell_sdf_room_plain_bin_openbox",
  "blockers": {
   "file": "blockers.bin",
-  "count": 78148,
+  "count": 89741,
   "stride": 64,
   "k": 8,
   "fields": {
@@ -498,22 +496,18 @@
   },
   "rule": "runtime/bake_blockers.py: centre ray per V cell, shares rescaled to 1 - V, hits within kex thicknesses occlude only, weight A Omega share V_blocker(-u), top 8 rescaled to the total",
   "kex": 3.0,
-  "seconds": 105.7,
-  "with_blockers": 66054,
-  "ratio_mean": 0.0028,
+  "seconds": 67.6,
+  "with_blockers": 76795,
+  "ratio_mean": 0.0023,
   "ratio_p50": 0.0,
-  "ratio_p99": 0.0754,
-  "ratio_max": 0.3606,
-  "ratio_over_0p1": 408
+  "ratio_p99": 0.0409,
+  "ratio_max": 0.4072,
+  "ratio_over_0p1": 89
  },
- "note": "SDF room with the outer skin layer of the boxes and walls baked at 1.0 x density for V (skin_transl.py)",
  "tree": {
-  "builder": "experiments/M37_sdf_splats/bintree.py",
   "kind": "binary",
-  "split": "auto",
-  "auto_min": 0.25,
-  "axis": "principal (largest eigenvector of the members' moment-matched covariance)",
+  "builder": "runtime/bintree.py",
   "source": "cornell_sdf_room_plain",
-  "note": "leaves and per-Gaussian files identical to the source asset"
+  "max_depth_cap": 32
  }
 }

@@ -311,9 +311,50 @@ fn env_add(g: u32, T: vec4f, ci: u32, si: u32) {
 fn env_dirs(@builtin(global_invocation_id) gid: vec3u) {
     let g = select(gid.x, gid.x * 4u + U.frame % 4u, (U.iso & 2u) != 0u);   // the Gaussians direct_dirs refreshed
     if (g >= U.gaussian_count || !env_active()) { return; }
+    env_dirs_one(g);
+}
+
+// sender LOD (default, ?sendercut=0 off; bounce.wgsl sc_select): the cut's leaves as direct_dirs_emit_sc picks them, and its
+// nodes with sc_shadow's T (env_T[2 G + n - G]) into sc_L after direct_dirs_nodes_sc
+@group(0) @binding(81) var<storage, read> sc_list: array<u32>;
+@group(0) @binding(83) var<storage, read_write> sc_L: array<vec4f>;   // bounce.wgsl sc_X: per slot x 8, the faces' direct light at 6-7
+@compute @workgroup_size(64)
+fn env_dirs_sc(@builtin(global_invocation_id) gid: vec3u) {
+    if (gid.x >= sc_list[0] || !env_active()) { return; }
+    let g = sc_list[16u + gid.x];
+    if ((U.iso & 2u) != 0u && g % 4u != U.frame % 4u) { return; }
+    env_dirs_one(g);
+}
+
+@compute @workgroup_size(64)
+fn env_dirs_nodes_sc(@builtin(global_invocation_id) gid: vec3u) {
+    if (gid.x >= sc_list[1] || !env_active() || !(sc_list[9] != 0u || (U.iso & 2u) == 0u || gid.x % 4u == U.frame % 4u)) { return; }   // bounce.wgsl sc_now
+    let n = sc_list[16u + U.gaussian_count + gid.x];
+    let G = gaussians[n];
+    let mat = materials[min(G.flags & 0xFFFFu, max(U.material_count, 1u) - 1u)];
+    if ((mat.flags & 1u) != 0u) { return; }
+    // per face of the node's short axis, before albedo and exposure (direct_dirs_nodes_sc)
+    let T = env_T[2u * U.gaussian_count + (n - U.gaussian_count)];
+    let nd = nodes[n];
+    let xf = parts[G.part_surface & 0xFFFFu].xf;
+    let nrm = quat_matrix(G.quat)[0];
+    let s3 = G.scale.x * G.scale.y * G.scale.z;
+    for (var k = 0u; k < min(ENV.info.x, 4u); k++) {
+        let L = ENV.lights[k];
+        let wi = xf_dir_inv(xf, L.dir_std.xyz);
+        let v = vgrid_lookup(vgrid[n], wi);
+        if (v <= 1e-7) { continue; }
+        let c = L.irr.rgb * (T[k] * v * footprint(nd, s3 * s3, wi));
+        let h = 0.5 + 0.5 * sc_face(dot(wi, nrm));
+        sc_L[gid.x * 8u + 6u] = vec4f(sc_L[gid.x * 8u + 6u].rgb + c * h, 0.0);
+        sc_L[gid.x * 8u + 7u] = vec4f(sc_L[gid.x * 8u + 7u].rgb + c * (1.0 - h), 0.0);
+    }
+}
+
+fn env_dirs_one(g: u32) {
     let G = gaussians[g];
     let mat = materials[min(G.flags & 0xFFFFu, max(U.material_count, 1u) - 1u)];
     if ((mat.flags & 1u) != 0u) { return; }
     let c = G.albedo * distant_catch(g) * iso_norm(nodes[g]);
-    for (var k = 0u; k < 14u; k++) { lo_dir[g * 14u + k] = vec4f(lo_dir[g * 14u + k].rgb + c, lo_dir[g * 14u + k].w); }
+    lo_dir[g] = vec4f(lo_dir[g].rgb + c, 0.0);   // common.wgsl LOB
 }

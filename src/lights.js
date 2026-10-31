@@ -101,8 +101,9 @@ function merge(a, b) {
 // Median split on the longest axis of the items' centres, down to single items.
 function buildTree(items) {
   if (items.length === 1) return items[0];
-  const lo = [0, 1, 2].map(k => Math.min(...items.map(it => it.mu[k])));
-  const hi = [0, 1, 2].map(k => Math.max(...items.map(it => it.mu[k])));
+  // loops, not Math.min(...array): spreading a large array overflows the call stack (2026-10-31)
+  const lo = [0, 1, 2].map(k => items.reduce((m, it) => Math.min(m, it.mu[k]), Infinity));
+  const hi = [0, 1, 2].map(k => items.reduce((m, it) => Math.max(m, it.mu[k]), -Infinity));
   const ax = [0, 1, 2].reduce((m, k) => (hi[k] - lo[k] > hi[m] - lo[m] ? k : m), 0);
   const sorted = [...items].sort((p, q) => p.mu[ax] - q.mu[ax]), half = sorted.length >> 1;
   return merge(buildTree(sorted.slice(0, half)), buildTree(sorted.slice(half)));

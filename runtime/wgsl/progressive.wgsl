@@ -1,3 +1,8 @@
+// ARCHIVED (David, 2026-10-29: out of date, would need a lot of work to bring back): the browser renderer no longer
+// builds or runs this (removed from lighting.js / main.js; backup scratchpad backup_pre_progressive_1110.tgz). Kept
+// for the native tools that still exercise it (renderer/tools/time_lighting.py, converge_frame.py --mode prog,
+// validate_native.py) and as a record.
+//
 // Progressive tree lighting (David, 2026-10-23): incoming light is computed for tree nodes from the root down under a
 // fixed per-frame budget, refined deeper where nothing changed and coarsened where something did; every leaf then
 // shades itself each frame from its deepest lit ancestor. Prepend common.wgsl and material_ext.wgsl.
@@ -648,7 +653,7 @@ fn lp_transfer(@builtin(global_invocation_id) gid: vec3u) {
         c += vec3f(unpack2x16float(lf.mat.pad0), unpack2x16float(lf.mat.pad1).x);
     }
     colour[g] = vec4f(c, 1.0);
-    lo_b[g * 15u + 14u] = vec4f(r.b[0], 0.0);
+    lo_b[g * LOB + LOB_EYE] = vec4f(r.b[0], 0.0);
 }
 
 @compute @workgroup_size(64)
@@ -659,8 +664,8 @@ fn lp_transfer_dirs(@builtin(global_invocation_id) gid: vec3u) {
     var wo: array<vec3f, 15>;
     for (var k = 0u; k < 14u; k++) { wo[k] = DIRS14[k]; }
     let r = transfer(g, lf, incoming(g), wo, 14u);
-    for (var k = 0u; k < 14u; k++) {
-        lo_dir[g * 14u + k] = vec4f(r.d[k], 0.0);
-        lo_b[g * 15u + k] = vec4f(r.b[k], 0.0);
-    }
+    var d = vec3f(0.0); var b = vec3f(0.0);   // one value toward the probes each (common.wgsl LOB)
+    for (var k = 0u; k < 14u; k++) { d += r.d[k] / 14.0; b += r.b[k] / 14.0; }
+    lo_dir[g] = vec4f(d, 0.0);
+    lo_b[g * LOB + LOB_SEND] = vec4f(b, 0.0);
 }

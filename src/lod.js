@@ -42,14 +42,15 @@ function quatFromColumns(c) {
 // Internal nodes (G..N-1) as Gaussian records: the node's mean, kappa and covariance (inverted from cinv), its part,
 // the mass-weighted albedo of its leaves and the material of its first leaf; and each node's own-part V grid, the
 // mass-weighted mean of its children's (for lighting a node directly, ?lodlight=1). Returns { records, vgrid, N, G, maxDepth }.
-export function nodeGaussians(asset) {
+// withV false: skip the node V grids (only lit nodes, ?lodlight, read them; most of the cost on big scenes)
+export function nodeGaussians(asset, withV = true) {
   const G = asset.count, nb = asset.raw.nodes, N = nb.byteLength / NODE;
   const nf = new Float32Array(nb), nu = new Uint32Array(nb), kids = new Uint32Array(asset.raw.kids);
   const gf = new Float32Array(asset.gaussians), gu = new Uint32Array(asset.gaussians);
   const out = new ArrayBuffer(Math.max(1, N - G) * GAUSS), of = new Float32Array(out), ou = new Uint32Array(out);
   const mass = new Float64Array(N), alb = new Float64Array(N * 3), mat = new Uint32Array(N);
-  const leafV = new Uint8Array(asset.raw.vgrid), V = new Float32Array(N * 128);   // V grid cells, 0-255
-  for (let i = 0; i < G * 128; i++) V[i] = leafV[i];
+  const leafV = new Uint8Array(asset.raw.vgrid), V = withV ? new Float32Array(N * 128) : null;   // V grid cells, 0-255
+  if (withV) for (let i = 0; i < G * 128; i++) V[i] = leafV[i];
   const cov = n => {
     const o = n * 24, a = nf.subarray(o + 4, o + 7), b = nf.subarray(o + 8, o + 11);   // cinv diag (xx yy zz), off (xy xz yz)
     const M = [[a[0], b[0], b[1]], [b[0], a[1], b[2]], [b[1], b[2], a[2]]];
@@ -73,7 +74,7 @@ export function nodeGaussians(asset) {
     let m = 0, c = [0, 0, 0];
     for (let k = lo; k < hi; k++) { const ch = kids[k]; m += mass[ch]; for (let j = 0; j < 3; j++) c[j] += mass[ch] * alb[3 * ch + j]; }
     mass[n] = m; for (let j = 0; j < 3; j++) alb[3 * n + j] = c[j] / Math.max(m, 1e-30);
-    for (let k = lo; k < hi; k++) { const ch = kids[k], w = mass[ch] / Math.max(m, 1e-30); for (let q = 0; q < 128; q++) V[n * 128 + q] += w * V[ch * 128 + q]; }
+    if (withV) for (let k = lo; k < hi; k++) { const ch = kids[k], w = mass[ch] / Math.max(m, 1e-30); for (let q = 0; q < 128; q++) V[n * 128 + q] += w * V[ch * 128 + q]; }
     mat[n] = hi > lo ? mat[kids[lo]] : 0;
     const [C] = cov(n), [vals, vecs] = eig3(C);
     const cols = vecs.slice();
@@ -88,9 +89,13 @@ export function nodeGaussians(asset) {
     of.set([alb[3 * n], alb[3 * n + 1], alb[3 * n + 2]], r * 16 + 12);
     ou[r * 16 + 15] = mat[n];
   }
-  const vgrid = new Uint8Array(Math.max(1, N - G) * 128);
-  for (let i = 0; i < (N - G) * 128; i++) vgrid[i] = Math.min(255, Math.round(V[G * 128 + i]));
-  return { records: out, vgrid: vgrid.buffer, N, G, maxDepth };
+  let vgrid = null;
+  if (withV) {
+    const vg = new Uint8Array(Math.max(1, N - G) * 128);
+    for (let i = 0; i < (N - G) * 128; i++) vg[i] = Math.min(255, Math.round(V[G * 128 + i]));
+    vgrid = vg.buffer;
+  }
+  return { records: out, vgrid, N, G, maxDepth };
 }
 
 const LOD_U_BYTES = 128;   // lod.wgsl LodU: view (64) + 4 u32 + 8 f32 + 4 u32
@@ -121,8 +126,11 @@ export class Lod {
     this.levelBuf = device.createBuffer({ label: 'lod nodes by depth', size: N * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(this.levelBuf, 0, order);
     this.pipes = {};
-    this.cut = lighting.lodCut;   // ?lodlight=2: the cut is chosen before the lighting and only it is shaded
-    const entries = { lod_colour: [1, 2, 4, 5, 9, 10, 11], lod_select: [1, 2, 3, 6, 11] };
+    this.cut = lighting.lodCut;
+    // open by the projected footprint's area (lod.wgsl screen_cov), the default since 2026-10-29 (David): long thin
+    // things collapse once they are thin on screen; ?lodsize=radius the bounding-radius rule
+    this.sizeRule = new URLSearchParams(globalThis.location?.search ?? '').get('lodsize') === 'radius' ? 0 : 1;   // ?lodlight=2: the cut is chosen before the lighting and only it is shaded
+    const entries = { lod_colour: [1, 2, 4, 5, 6, 9, 10, 11], lod_select: [1, 2, 3, 6, 11] };
     if (this.cut) Object.assign(entries, { lod_list: [6, 7, 8], lod_args: [7] });
     for (const [e, binds] of Object.entries(entries)) {
       const pipe = device.createComputePipeline({ label: e, layout: 'auto', compute: { module, entryPoint: e } });
@@ -136,13 +144,24 @@ export class Lod {
   // view: world -> view (column-major 16 floats); threshold: node footprint in px to open at; gain: bounce gain
   // shutter, blurLod: motion blur variant D (?blur=1&blurlod=<k>): a moving part opens only nodes over k x its smear
   // ?lodlight=2: main.js calls this before the lighting (it needs only the camera) and encode() skips it
-  encodeSelect(encoder, view, threshold, focal, near, gain, shutter = 0, blurLod = 0) {
+  // moved: a part moved this frame (main.js writeParts). The cut is kept when nothing it depends on changed: the
+  // camera, the settings and every part's transform (2026-10-31: re-selecting a still view cost ~4 ms on hill).
+  encodeSelect(encoder, view, threshold, focal, near, gain, shutter = 0, blurLod = 0, moved = true) {
     const { N, G, maxDepth } = this.info;
     this.last = { threshold, focal, near, gain, shutter, blurLod };   // inspection (gsDebug.lod)
+    if (!(threshold > 0) && !this.lighting.lodLight) return;
+    const key = [...view, threshold, focal, near, shutter, blurLod, this.openParts?.() ?? 0, this.colourAll ? 1 : 0, this.lighting.lodLight ? 1 : 0].join();
+    const blurSel = blurLod > 0 && shutter > 0;   // blur LOD: a part that just stopped still has last frame's smear
+    if (!moved && !this.cut && !blurSel && key === this.selectKey) return;
+    // same camera and settings: re-select only the parts that moved (lighting.movedMask, set by main.js writeParts)
+    const mask = (this.lighting.movedMask ?? 0) >>> 0;
+    const only = key === this.selectKey && !this.cut && !blurSel && mask !== 0 ? mask : 0xffffffff;
+    this.selectKey = key;
     for (let d = 0; d <= maxDepth; d++) {
       const ab = new ArrayBuffer(LOD_U_BYTES), f = new Float32Array(ab), u = new Uint32Array(ab);
-      f.set(view, 0); u.set([G, N, d, this.emitPart], 16); f.set([threshold, focal, near, gain, shutter, blurLod, this.lighting.lodLight ? 1 : 0, 0], 20);
-      const l = this.levels[d]; u.set([l.off, l.nInt, l.nAll, 0], 28);
+      f.set(view, 0); u.set([G, N, only, this.emitPart], 16); f.set([threshold, focal, near, gain, shutter, blurLod, this.lighting.lodLight ? 1 : 0, 0], 20);
+      u[27] = this.openParts?.() ?? 0;   // LodU.open_parts (main.js)
+      const l = this.levels[d]; u.set([l.off, l.nInt, l.nAll, this.sizeRule | (this.colourAll ? 2 : 0)], 28);   // bit 1: lod_colour colours every node
       this.device.queue.writeBuffer(this.uniforms[d], 0, ab);
     }
     for (let d = 0; d <= maxDepth; d++) this.run(encoder, 'lod_select', d, this.levels[d].nAll);
@@ -154,16 +173,24 @@ export class Lod {
     }
   }
 
+  // node colours bottom-up from this frame's leaf colours (after encodeSelect: only the drawn subtrees unless colourAll)
+  encodeColour(encoder) {
+    for (let d = this.info.maxDepth; d >= 0; d--) this.run(encoder, 'lod_colour', d, this.levels[d].nInt);
+  }
+
   run(encoder, e, d, threads) {
     const pass = encoder.beginComputePass({ label: `${e} ${d}` });
     pass.setPipeline(this.pipes[e].pipe); pass.setBindGroup(0, this.pipes[e].groups[d]);
     pass.dispatchWorkgroups(Math.max(1, Math.ceil(threads / 64))); pass.end();
   }
 
-  encode(encoder, view, threshold, focal, near, gain, shutter = 0, blurLod = 0) {
-    const { N, G, maxDepth } = this.info;
-    if (!this.cut) this.encodeSelect(encoder, view, threshold, focal, near, gain, shutter, blurLod);
-    for (let d = maxDepth; d >= 0; d--) this.run(encoder, 'lod_colour', d, this.levels[d].nInt);
+  // colourAll: colour every node, not only the drawn subtrees (main.js: an explosion, whose lit colours stay while
+  // its cut follows the camera)
+  encode(encoder, view, threshold, focal, near, gain, shutter = 0, blurLod = 0, moved = true, colourAll = false) {
+    if (!(threshold > 0) && !this.lighting.lodLight) return;   // ?lod=0 (the sender cut alone keeps the tree): nothing drawn from it
+    this.colourAll = colourAll || !!this.debugColourAll;   // debugColourAll: smoke_renderer.mjs lod_colour_cut
+    if (!this.cut) this.encodeSelect(encoder, view, threshold, focal, near, gain, shutter, blurLod, moved);
+    this.encodeColour(encoder);
     this.lighting.encodeNodeDirect(encoder);   // ?lodlight=1/2: drawn nodes lit directly (+ their leaves' mean bounce)
   }
 }
